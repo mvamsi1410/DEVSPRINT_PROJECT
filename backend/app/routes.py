@@ -9,6 +9,7 @@ from flask import (
 import os
 import random
 import json
+import uuid
 from datetime import datetime
 
 from werkzeug.utils import secure_filename
@@ -43,6 +44,7 @@ from .models import (
     Payment,
     Invoice,
     LessonProgress,
+    LessonResource,
     Wishlist,
     Discussion,
 )
@@ -1371,6 +1373,34 @@ def course_details(
                         progress_row.completed
                     )
 
+            resources = (
+                LessonResource.query
+                .filter_by(
+                    lesson_id=lesson.id
+                )
+                .order_by(
+                    LessonResource.id.asc()
+                )
+                .all()
+            )
+
+            resource_result = []
+
+            for resource in resources:
+                resource_result.append({
+                    "id": resource.id,
+                    "type": resource.resource_type,
+                    "fileName": resource.file_name,
+                    "title": resource.title or resource.file_name,
+                    "url": "/api/files/" + os.path.relpath(
+                         resource.file_path,
+                        current_app.config["UPLOAD_FOLDER"],
+                    ).replace(
+                        os.sep,
+                         "/",
+                    ),           
+                })
+
             lesson_result.append({
                 "id": lesson.id,
                 "title": lesson.title,
@@ -1383,6 +1413,7 @@ def course_details(
                 "video_url": lesson.video_url,
                 "pdf_url": lesson.pdf_url,
                 "completed": completed,
+                "resources": resource_result,
             })
 
         module_result.append({
@@ -1431,7 +1462,7 @@ def trainer_courses(user):
             trainer_id=trainer.id
         )
         .order_by(
-            Course.id.desc()
+            Course.created_at.desc()
         )
         .all()
     )
@@ -1771,13 +1802,23 @@ def trainer_create_module(
                 "Module title is required"
         }), 400
 
+    last_module = (
+    Module.query
+    .filter_by(course_id=course.id)
+    .order_by(Module.order_no.desc())
+    .first()
+    )
+
+    next_order_no = (
+    (last_module.order_no or 0) + 1
+    if last_module
+    else 1
+    )
+
     module = Module(
-        course_id=course.id,
-        title=title,
-        description=data.get(
-            "description",
-            "",
-        ),
+    course_id=course.id,
+    title=title,
+    order_no=next_order_no,
     )
 
     db.session.add(module)
@@ -1847,8 +1888,6 @@ def trainer_update_module(
             data["title"]
         ).strip()
 
-    if "description" in data:
-        module.description = data["description"]
 
     db.session.commit()
 
@@ -1911,10 +1950,34 @@ def trainer_create_lesson(
         or {}
     )
 
+    # -----------------------------------------------------
+    # LESSON ID
+    # -----------------------------------------------------
+
+    lesson_id = str(
+        data.get(
+            "id",
+            data.get(
+                "lesson_id",
+                ""
+            )
+        )
+    ).strip()
+
+    if not lesson_id:
+        return jsonify({
+            "error":
+                "Lesson ID is required"
+        }), 400
+
+    # -----------------------------------------------------
+    # LESSON TITLE
+    # -----------------------------------------------------
+
     title = str(
         data.get(
             "title",
-            "",
+            ""
         )
     ).strip()
 
@@ -1924,25 +1987,71 @@ def trainer_create_lesson(
                 "Lesson title is required"
         }), 400
 
+    # -----------------------------------------------------
+    # CHECK DUPLICATE LESSON ID
+    # -----------------------------------------------------
+
+    if Lesson.query.get(lesson_id):
+        return jsonify({
+            "error":
+                "Lesson ID already exists"
+        }), 409
+
+    # -----------------------------------------------------
+    # LESSON CONTENT
+    # -----------------------------------------------------
+
+    content = data.get(
+        "content",
+        data.get(
+            "description",
+            ""
+        )
+    )
+
+    # -----------------------------------------------------
+    # ORDER NUMBER
+    # -----------------------------------------------------
+
+    last_lesson = (
+        Lesson.query
+        .filter_by(
+            module_id=module.id
+        )
+        .order_by(
+            Lesson.order_no.desc()
+        )
+        .first()
+    )
+
+    next_order_no = (
+        (last_lesson.order_no + 1)
+        if last_lesson
+        else 1
+    )
+
+    # -----------------------------------------------------
+    # CREATE LESSON
+    # -----------------------------------------------------
+
     lesson = Lesson(
+        id=lesson_id,
         module_id=module.id,
         title=title,
-        description=data.get(
-            "description",
-            "",
-        ),
+        content=content,
         duration=data.get(
             "duration",
-            "",
+            "00:00"
         ),
         video_url=data.get(
             "video_url",
-            "",
+            ""
         ),
         pdf_url=data.get(
             "pdf_url",
-            "",
+            ""
         ),
+        order_no=next_order_no,
     )
 
     db.session.add(lesson)
@@ -1951,18 +2060,17 @@ def trainer_create_lesson(
     return jsonify({
         "message":
             "Lesson created successfully",
+
         "lesson": {
             "id": lesson.id,
             "module_id": lesson.module_id,
             "title": lesson.title,
-            "description": getattr(
-                lesson,
-                "description",
-                "",
-            ),
+            "description": lesson.content or "",
+            "content": lesson.content or "",
             "duration": lesson.duration,
             "video_url": lesson.video_url,
             "pdf_url": lesson.pdf_url,
+            "order_no": lesson.order_no,
         },
     }), 201
 
@@ -2427,7 +2535,37 @@ def update_lesson_progress(user, lesson_id):
             if percentage >= 100:
                 enrollment.status = "completed"
 
-    db.session.commit()
+                # ------------------------------------------------
+                # Generate certificate automatically
+                # ------------------------------------------------
+
+                existing_certificate = Certificate.query.filter_by(
+                    learner_id=learner.id,
+                    course_id=course.id
+                ).first()
+
+                if not existing_certificate:
+
+                    now = datetime.utcnow()
+
+                    certificate_id = (
+                        f"CERT-{now.year}-"
+                        f"{learner.id:04d}-"
+                        f"{course.id}"
+                    )
+
+                    certificate = Certificate(
+                        certificate_id=certificate_id,
+                        learner_id=learner.id,
+                        course_id=course.id,
+                        start_date=enrollment.enrolled_at or now,
+                        end_date=now,
+                        status="valid"
+                    )
+
+                    db.session.add(certificate)
+
+            db.session.commit()
 
     return jsonify({
         "message": "Lesson progress updated",
@@ -5454,6 +5592,77 @@ def save_uploaded_file(file, folder):
 
     return path
 
+# ============================================================
+# TRAINER — UPDATE LESSON DURATION
+# ============================================================
+
+@api.put("/trainer/lessons/<string:lesson_id>/duration")
+@role_required("trainer")
+def trainer_update_lesson_duration(
+    user,
+    lesson_id
+):
+    trainer = Trainer.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not trainer:
+        return jsonify({
+            "error": "Trainer profile not found"
+        }), 404
+
+    lesson = Lesson.query.get(
+        lesson_id
+    )
+
+    if not lesson:
+        return jsonify({
+            "error": "Lesson not found"
+        }), 404
+
+    module = Module.query.get(
+        lesson.module_id
+    )
+
+    if not module:
+        return jsonify({
+            "error": "Module not found"
+        }), 404
+
+    course = Course.query.filter_by(
+        id=module.course_id,
+        trainer_id=trainer.id
+    ).first()
+
+    if not course:
+        return jsonify({
+            "error": "You do not own this lesson"
+        }), 403
+
+    data = request.get_json(
+        silent=True
+    ) or {}
+
+    duration = data.get(
+        "duration"
+    )
+
+    if not duration:
+        return jsonify({
+            "error": "Duration is required"
+        }), 400
+
+    lesson.duration = str(
+        duration
+    )
+
+    db.session.commit()
+
+    return jsonify({
+        "message": "Lesson duration updated successfully",
+        "lesson_id": lesson.id,
+        "duration": lesson.duration
+    })
 
 # ============================================================
 # TRAINER — LESSON VIDEO UPLOAD
@@ -5483,9 +5692,18 @@ def trainer_upload_lesson_video(
             "error": "Lesson not found"
         }), 404
 
+    module = Module.query.get(
+    lesson.module_id
+    )
+
+    if not module:
+        return jsonify({
+        "error": "Module not found"
+    }), 404
+
     course = Course.query.filter_by(
-        id=lesson.course_id,
-        trainer_id=trainer.id
+    id=module.course_id,
+    trainer_id=trainer.id
     ).first()
 
     if not course:
@@ -5524,6 +5742,16 @@ def trainer_upload_lesson_video(
         )
     )
 
+    video_resource = LessonResource(
+        lesson_id=lesson.id,
+        resource_type="video",
+        file_name=video.filename,
+        file_path=saved_path,
+        title=video.filename,
+    )
+
+    db.session.add(video_resource)
+
     db.session.commit()
 
     return jsonify({
@@ -5560,10 +5788,19 @@ def trainer_upload_lesson_pdf(
             "error": "Lesson not found"
         }), 404
 
+    module = Module.query.get(
+    lesson.module_id
+)
+
+    if not module:
+        return jsonify({
+        "error": "Module not found"
+    }), 404
+
     course = Course.query.filter_by(
-        id=lesson.course_id,
-        trainer_id=trainer.id
-    ).first()
+    id=module.course_id,
+    trainer_id=trainer.id
+    ).first()   
 
     if not course:
         return jsonify({
@@ -5600,6 +5837,16 @@ def trainer_upload_lesson_pdf(
             "/"
         )
     )
+
+    pdf_resource = LessonResource(
+        lesson_id=lesson.id,
+        resource_type="pdf",
+        file_name=pdf.filename,
+        file_path=saved_path,
+        title=pdf.filename,
+    )
+
+    db.session.add(pdf_resource)
 
     db.session.commit()
 
@@ -5678,6 +5925,114 @@ def trainer_upload_course_resource(
         }
     }), 201
 
+# ============================================================
+# TRAINER — DELETE LESSON RESOURCE
+# ============================================================
+
+@api.delete(
+    "/trainer/lessons/<string:lesson_id>/resources/<string:resource_type>/<path:file_name>"
+)
+@role_required("trainer")
+def trainer_delete_lesson_resource(
+    user,
+    lesson_id,
+    resource_type,
+    file_name,
+):
+    trainer = Trainer.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not trainer:
+        return jsonify({
+            "error": "Trainer profile not found"
+        }), 404
+
+    lesson = Lesson.query.get(
+        lesson_id
+    )
+
+    if not lesson:
+        return jsonify({
+            "error": "Lesson not found"
+        }), 404
+
+    module = Module.query.get(
+        lesson.module_id
+    )
+
+    if not module:
+        return jsonify({
+            "error": "Module not found"
+        }), 404
+
+    course = Course.query.filter_by(
+        id=module.course_id,
+        trainer_id=trainer.id
+    ).first()
+
+    if not course:
+        return jsonify({
+            "error": "You do not own this lesson"
+        }), 403
+
+    resource = (
+        LessonResource.query
+        .filter_by(
+            lesson_id=lesson.id,
+            resource_type=resource_type,
+            file_name=file_name,
+        )
+        .first()
+    )
+
+    if not resource:
+        return jsonify({
+            "error": "Resource not found"
+        }), 404
+
+    file_path = resource.file_path
+
+    # Delete the physical file
+    if file_path and os.path.isfile(file_path):
+        os.remove(file_path)
+
+    # Clear the legacy lesson URL if this resource
+    # is the currently stored PDF/video.
+    if resource_type == "pdf":
+        expected_url = (
+            "/" + file_path.replace(
+                os.sep,
+                "/"
+            )
+        )
+
+        if lesson.pdf_url == expected_url:
+            lesson.pdf_url = None
+
+    elif resource_type == "video":
+        expected_url = (
+            "/" + file_path.replace(
+                os.sep,
+                "/"
+            )
+        )
+
+        if lesson.video_url == expected_url:
+            lesson.video_url = None
+
+    db.session.delete(resource)
+
+    db.session.commit()
+
+    return jsonify({
+        "message": "Resource deleted successfully",
+        "resource": {
+            "id": resource.id,
+            "type": resource_type,
+            "fileName": file_name,
+        }
+    })
 
 # ============================================================
 # SERVE UPLOADED FILES

@@ -15,6 +15,27 @@ def create_app():
     app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL")
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+    app.config["UPLOAD_FOLDER"] = os.path.join(
+        os.path.dirname(app.root_path),
+        "uploads"
+    )
+
+    os.makedirs(
+        app.config["UPLOAD_FOLDER"],
+        exist_ok=True
+    )
+
+    CORS(app, resources={
+        r"/api/*": {
+            "origins": os.getenv(
+                "FRONTEND_ORIGIN",
+                "http://localhost:5173"
+            )
+        }
+    })
+
     CORS(app, resources={r"/api/*": {"origins": os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")}})
     db.init_app(app)
 
