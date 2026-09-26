@@ -71,6 +71,32 @@ export default function LessonPlayer() {
     return `/${fileUrl}`
   }
 
+    // =========================================================
+  // LESSON RESOURCES
+  // =========================================================
+
+  const videoResource =
+    lesson?.resources?.find(
+      (resource) =>
+        resource.type === 'video'
+    )
+
+  const pdfResource =
+    lesson?.resources?.find(
+      (resource) =>
+        resource.type === 'pdf'
+    )
+
+  const videoUrl =
+    videoResource?.url ||
+    lesson?.video_url ||
+    ''
+
+  const pdfUrl =
+    pdfResource?.url ||
+    lesson?.pdf_url ||
+    ''
+
 
   // =========================================================
   // LOAD COURSE + LESSON
@@ -199,7 +225,7 @@ export default function LessonPlayer() {
     let cancelled = false
 
     async function loadVideo() {
-      if (!lesson?.video_url) {
+      if (!videoUrl) {
         setVideoBlobUrl('')
         return
       }
@@ -210,7 +236,7 @@ export default function LessonPlayer() {
 
         const endpoint =
           getResourceEndpoint(
-            lesson.video_url
+            videoUrl
           )
 
         if (!endpoint) {
@@ -267,7 +293,7 @@ export default function LessonPlayer() {
       setVideoBlobUrl('')
     }
 
-  }, [lesson?.video_url])
+  }, [videoUrl])
 
 
   // =========================================================
@@ -275,7 +301,7 @@ export default function LessonPlayer() {
   // =========================================================
 
   const openPdf = async () => {
-    if (!lesson?.pdf_url) {
+    if (!pdfUrl) {
       alert(
         'No PDF has been uploaded for this lesson.'
       )
@@ -287,7 +313,7 @@ export default function LessonPlayer() {
 
       const endpoint =
         getResourceEndpoint(
-          lesson.pdf_url
+          pdfUrl
         )
 
       if (!endpoint) {
@@ -849,7 +875,7 @@ export default function LessonPlayer() {
             </p>
 
 
-            {lesson.pdf_url ? (
+            {pdfUrl ? (
 
               <div
                 style={{

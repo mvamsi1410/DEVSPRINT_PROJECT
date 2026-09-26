@@ -72,36 +72,19 @@ export default function Leaderboard({ role }) {
 
       const rawLeaderboard = data.leaderboard || []
 
-      const normalizedLeaderboard = rawLeaderboard.map(
-        (learner, index) => {
-          if (isLearner) {
-            return {
-              learner_id: learner.learner_id,
-              user_id: learner.user_id,
-              name: learner.name,
-              email: learner.email || '',
-              courses: learner.courses || 0,
-              completedLessons:
-                learner.completedLessons || 0,
-              progress: learner.progress || 0,
-              rank: learner.rank || index + 1,
-            }
-          }
-
-          return {
-            learner_id: learner.learner_id,
+      const normalizedLeaderboard =
+       rawLeaderboard.map(
+     (learner, index) => ({
+          learner_id: learner.learner_id,
             user_id: learner.user_id,
             name: learner.name,
             email: learner.email || '',
-            courses: learner.completed_courses || 0,
-            completedLessons: 0,
-            progress: learner.average_progress || 0,
+            courses: learner.courses || 0,
+            completedLessons:
+              learner.completedLessons || 0,
+            progress: learner.progress || 0,
             rank: learner.rank || index + 1,
-
-            // Keep quiz score available if needed later.
-            quiz_score: learner.quiz_score || 0,
-          }
-        }
+         })
       )
 
       setLeaderboard(normalizedLeaderboard)

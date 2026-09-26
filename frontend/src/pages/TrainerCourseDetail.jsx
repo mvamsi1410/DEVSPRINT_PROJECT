@@ -808,7 +808,10 @@ export default function TrainerCourseDetail() {
         resource.fileName
       )
 
-
+      console.log(
+      'RESOURCE URL:',
+        resource.url
+      )
       const blob =
         await fetchAuthenticatedBlob(
           resource.url
