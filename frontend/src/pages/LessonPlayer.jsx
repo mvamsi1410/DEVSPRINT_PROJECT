@@ -30,6 +30,7 @@ export default function LessonPlayer() {
   const [error, setError] = useState('')
 
   const [savingProgress, setSavingProgress] = useState(false)
+  
 
   // Authenticated media Blob URLs
   const [videoBlobUrl, setVideoBlobUrl] = useState('')
@@ -44,33 +45,28 @@ export default function LessonPlayer() {
   // =========================================================
   // CONVERT BACKEND RESOURCE URL TO API ENDPOINT
   // =========================================================
-
-  const getResourceEndpoint = (fileUrl) => {
+const getResourceEndpoint = (fileUrl) => {
     if (!fileUrl) {
-      return ''
+        return ''
     }
 
-    if (fileUrl.startsWith('http://localhost:5001')) {
-      return fileUrl.replace(
-        'http://localhost:5001',
-        ''
-      )
-    }
-
-    if (fileUrl.startsWith('https://localhost:5001')) {
-      return fileUrl.replace(
-        'https://localhost:5001',
-        ''
-      )
+    if (
+        fileUrl.startsWith(
+            import.meta.env.VITE_API_BASE_URL
+        )
+    ) {
+        return fileUrl.replace(
+            import.meta.env.VITE_API_BASE_URL,
+            ''
+        )
     }
 
     if (fileUrl.startsWith('/')) {
-      return fileUrl
+        return fileUrl
     }
 
     return `/${fileUrl}`
-  }
-
+}
     // =========================================================
   // LESSON RESOURCES
   // =========================================================
@@ -397,8 +393,9 @@ export default function LessonPlayer() {
               method: 'POST',
 
               body: JSON.stringify({
-                completed: true
-              })
+  completed: true,
+  learning_time_seconds: Math.floor(videoTime)
+})
             }
           )
 
@@ -656,18 +653,19 @@ export default function LessonPlayer() {
 
             ) : videoBlobUrl ? (
 
-              <video
-                controls
-                preload="metadata"
-                style={{
-                  width: '100%',
-                  maxHeight: 520,
-                  display: 'block'
-                }}
-                src={
-                  videoBlobUrl
-                }
-              >
+            <video
+  controls
+  preload="metadata"
+  style={{
+    width: '100%',
+    maxHeight: 520,
+    display: 'block'
+  }}
+  src={videoBlobUrl}
+  onTimeUpdate={(event) => {
+    setVideoTime(event.currentTarget.currentTime)
+  }}
+>
                 Your browser does not
                 support video playback.
               </video>

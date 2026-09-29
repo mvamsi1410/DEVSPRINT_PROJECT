@@ -1,5 +1,14 @@
-import React, { createContext, useContext, useState } from 'react'
-import { loginUser } from '../services/api'
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect
+} from 'react'
+
+import {
+  loginUser,
+  getCurrentUser
+} from '../services/api'
 
 const AuthContext = createContext(null)
 
@@ -9,11 +18,37 @@ export function AuthProvider({ children }) {
     return saved ? JSON.parse(saved) : null
   })
 
+  // Re-check session when the application loads
+  useEffect(() => {
+    const token = localStorage.getItem('access_token')
+
+    if (!token) {
+      return
+    }
+
+    getCurrentUser(token)
+      .then((data) => {
+        const currentUser = data.user || data
+
+        localStorage.setItem(
+          'devsprint_user',
+          JSON.stringify(currentUser)
+        )
+
+        setUser(currentUser)
+      })
+      .catch(() => {
+        localStorage.removeItem('access_token')
+        localStorage.removeItem('devsprint_user')
+        setUser(null)
+      })
+  }, [])
+
   const login = async (email, password) => {
     try {
       const data = await loginUser(email, password)
 
-      if (data && data.user && data.token)  {
+      if (data && data.user && data.token) {
         const nextUser = data.user
 
         localStorage.setItem(

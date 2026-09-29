@@ -48,6 +48,18 @@ class User(db.Model):
         nullable=False,
         default="active"
     )
+    failed_login_attempts = db.Column(
+    db.Integer,
+    nullable=False,
+    default=0
+    )
+
+    locked_until = db.Column(
+    db.DateTime,
+    nullable=True
+    )
+
+    
 
     created_at = db.Column(
         db.DateTime,
@@ -460,6 +472,12 @@ class LessonProgress(db.Model):
         default=False
     )
 
+    learning_time_seconds = db.Column(
+        db.Integer,
+        default=0,
+        nullable=False
+    )
+
     updated_at = db.Column(
         db.DateTime,
         default=datetime.utcnow,
@@ -473,8 +491,6 @@ class LessonProgress(db.Model):
             name="uq_lesson_progress"
         ),
     )
-
-
 # =========================================================
 # ASSIGNMENT
 # =========================================================
@@ -758,6 +774,12 @@ class Certificate(db.Model):
         unique=True,
         nullable=False,
         index=True
+    )
+    verification_id = db.Column(
+    db.String(64),
+    unique=True,
+    nullable=True,
+    index=True
     )
 
     learner_id = db.Column(

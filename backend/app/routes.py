@@ -5,12 +5,12 @@ from flask import (
     send_from_directory,
     current_app,
 )
-
+import secrets
 import os
 import random
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from werkzeug.utils import secure_filename
 
@@ -647,7 +647,6 @@ def register():
 # =========================================================
 # AUTH - LOGIN
 # =========================================================
-
 @api.post("/auth/login")
 def login():
     data = (
@@ -666,18 +665,67 @@ def login():
         "",
     )
 
-    user = login_user(
+    # Password length validation
+    if len(password) < 8:
+        return jsonify({
+            "error": "Password must be at least 8 characters"
+        }), 400
+
+    user = User.query.filter_by(
+        email=email
+    ).first()
+
+    if not user:
+        return jsonify({
+            "error": "Invalid email or password"
+        }), 401
+
+    # Check account lock
+    now = datetime.utcnow()
+
+    if (
+        user.locked_until
+        and user.locked_until > now
+    ):
+        return jsonify({
+            "error": "Account temporarily locked. Try again later.",
+            "locked_until": user.locked_until.isoformat()
+        }), 423
+
+    # Check password
+    authenticated_user = login_user(
         email,
         password,
     )
 
-    if not user:
+    if not authenticated_user:
+
+        user.failed_login_attempts = (
+            user.failed_login_attempts or 0
+        ) + 1
+
+        if user.failed_login_attempts >= 5:
+            user.locked_until = (
+                now + timedelta(minutes=15)
+            )
+
+        db.session.commit()
+
+        if user.failed_login_attempts >= 5:
+            return jsonify({
+                "error": "Too many failed login attempts. Account locked for 15 minutes."
+            }), 423
+
         return jsonify({
-            "error":
-                "Invalid email or password"
+            "error": "Invalid email or password"
         }), 401
 
-    if user.status != "active":
+    # Successful login resets failed attempts
+    user.failed_login_attempts = 0
+    user.locked_until = None
+    db.session.commit()
+
+    if authenticated_user.status != "active":
         return jsonify({
             "error":
                 "Your account is inactive"
@@ -687,22 +735,21 @@ def login():
 
     if (
         requested_role
-        and requested_role != user.role
+        and requested_role != authenticated_user.role
     ):
         return jsonify({
             "error":
-                f"This account is registered as {user.role}"
+                f"This account is registered as {authenticated_user.role}"
         }), 403
 
     return jsonify({
         "message":
             "Login successful",
         "user":
-            user_json(user),
+            user_json(authenticated_user),
         "token":
-            make_token(user),
+            make_token(authenticated_user),
     })
-
 
 # =========================================================
 # AUTH - CURRENT USER
@@ -2407,17 +2454,43 @@ def learner_dashboard(user):
         "courses":
             courses_result,
     })
-# ============================================================
+
+
+def duration_to_seconds(duration):
+    if not duration:
+        return 0
+
+    parts = duration.split(":")
+
+    try:
+        parts = [int(part) for part in parts]
+    except ValueError:
+        return 0
+
+    if len(parts) == 2:
+        minutes, seconds = parts
+        return minutes * 60 + seconds
+
+    if len(parts) == 3:
+        hours, minutes, seconds = parts
+        return hours * 3600 + minutes * 60 + seconds
+
+    return 0
+## ============================================================
 # LEARNER PROGRESS
 # ============================================================
 
 @api.get("/learner/lessons/<string:lesson_id>/progress")
 @role_required("learner")
 def get_lesson_progress(user, lesson_id):
-    learner = Learner.query.filter_by(user_id=user.id).first()
+    learner = Learner.query.filter_by(
+        user_id=user.id
+    ).first()
 
     if not learner:
-        return jsonify({"error": "Learner profile not found"}), 404
+        return jsonify({
+            "error": "Learner profile not found"
+        }), 404
 
     progress = LessonProgress.query.filter_by(
         learner_id=learner.id,
@@ -2426,7 +2499,11 @@ def get_lesson_progress(user, lesson_id):
 
     return jsonify({
         "lesson_id": lesson_id,
-        "completed": bool(progress.completed) if progress else False
+        "completed": bool(progress.completed) if progress else False,
+        "learning_time_seconds": (
+            progress.learning_time_seconds
+            if progress else 0
+        )
     })
 
 
@@ -2451,9 +2528,44 @@ def update_lesson_progress(user, lesson_id):
 
     data = request.get_json(silent=True) or {}
 
-    completed = bool(
-        data.get("completed", False)
+    try:
+        requested_learning_time = int(
+            data.get("learning_time_seconds", 0) or 0
+        )
+    except (TypeError, ValueError):
+        return jsonify({
+            "error": "Invalid learning time"
+        }), 400
+
+    if requested_learning_time < 0:
+        requested_learning_time = 0
+
+    # --------------------------------------------------------
+    # Validate lesson learning time
+    # --------------------------------------------------------
+
+    lesson_duration_seconds = duration_to_seconds(
+        lesson.duration
     )
+
+    # Never allow learning time greater than lesson duration
+    validated_learning_time = min(
+        requested_learning_time,
+        lesson_duration_seconds
+    )
+
+    # Minimum required = 75% of lesson duration
+    lesson_minimum_time = int(
+        lesson_duration_seconds * 0.75
+    )
+
+    lesson_completed = (
+        validated_learning_time >= lesson_minimum_time
+    )
+
+    # --------------------------------------------------------
+    # Create or update lesson progress
+    # --------------------------------------------------------
 
     progress = LessonProgress.query.filter_by(
         learner_id=learner.id,
@@ -2464,14 +2576,27 @@ def update_lesson_progress(user, lesson_id):
         progress = LessonProgress(
             learner_id=learner.id,
             lesson_id=lesson_id,
-            completed=completed
+            completed=lesson_completed,
+            learning_time_seconds=validated_learning_time
         )
+
         db.session.add(progress)
+
     else:
-        progress.completed = completed
+        # Never reduce previously validated learning time
+        progress.learning_time_seconds = max(
+            progress.learning_time_seconds or 0,
+            validated_learning_time
+        )
+
+        # Recalculate completion status
+        progress.completed = (
+            progress.learning_time_seconds
+            >= lesson_minimum_time
+        )
 
     # --------------------------------------------------------
-    # Find the course through the lesson's module
+    # Find course through lesson's module
     # --------------------------------------------------------
 
     module = Module.query.get(
@@ -2508,6 +2633,11 @@ def update_lesson_progress(user, lesson_id):
         ]
 
         if lesson_ids:
+
+            # ------------------------------------------------
+            # Count completed lessons
+            # ------------------------------------------------
+
             completed_count = (
                 LessonProgress.query
                 .filter(
@@ -2518,11 +2648,99 @@ def update_lesson_progress(user, lesson_id):
                 .count()
             )
 
-            percentage = int(
-                (completed_count / len(lesson_ids)) * 100
+            # ------------------------------------------------
+            # Calculate total course duration
+            # ------------------------------------------------
+
+            total_course_duration = sum(
+                duration_to_seconds(item.duration)
+                for item in course_lessons
             )
+
+            # ------------------------------------------------
+            # Calculate validated learning time
+            # ------------------------------------------------
+
+            progress_records = (
+                LessonProgress.query
+                .filter(
+                    LessonProgress.learner_id == learner.id,
+                    LessonProgress.lesson_id.in_(lesson_ids)
+                )
+                .all()
+            )
+
+            total_learning_time = 0
+
+            for record in progress_records:
+
+                lesson_duration = next(
+                    (
+                        item.duration
+                        for item in course_lessons
+                        if item.id == record.lesson_id
+                    ),
+                    "00:00"
+                )
+
+                lesson_duration_seconds = (
+                    duration_to_seconds(
+                        lesson_duration
+                    )
+                )
+
+                validated_time = min(
+                    record.learning_time_seconds or 0,
+                    lesson_duration_seconds
+                )
+
+                total_learning_time += validated_time
+
+            # ------------------------------------------------
+            # Maximum allowed = 100% of course duration
+            # ------------------------------------------------
+
+            total_learning_time = min(
+                total_learning_time,
+                total_course_duration
+            )
+
+            # ------------------------------------------------
+            # Minimum required = 75% of course duration
+            # ------------------------------------------------
+
+            minimum_learning_time = int(
+                total_course_duration * 0.75
+            )
+
+            learning_time_valid = (
+                total_learning_time
+                >= minimum_learning_time
+            )
+
+            # ------------------------------------------------
+            # Course completion
+            # ------------------------------------------------
+
+            if (
+                completed_count == len(lesson_ids)
+                and learning_time_valid
+            ):
+                percentage = 100
+            else:
+                percentage = int(
+                    (completed_count / len(lesson_ids)) * 100
+                )
+
         else:
+            total_course_duration = 0
+            total_learning_time = 0
+            minimum_learning_time = 0
             percentage = 0
+
+        # ----------------------------------------------------
+        # Update enrollment
+        # ----------------------------------------------------
 
         enrollment = Enrollment.query.filter_by(
             learner_id=learner.id,
@@ -2535,14 +2753,18 @@ def update_lesson_progress(user, lesson_id):
             if percentage >= 100:
                 enrollment.status = "completed"
 
-                # ------------------------------------------------
+                # --------------------------------------------
                 # Generate certificate automatically
-                # ------------------------------------------------
+                # --------------------------------------------
 
-                existing_certificate = Certificate.query.filter_by(
-                    learner_id=learner.id,
-                    course_id=course.id
-                ).first()
+                existing_certificate = (
+                    Certificate.query
+                    .filter_by(
+                        learner_id=learner.id,
+                        course_id=course.id
+                    )
+                    .first()
+                )
 
                 if not existing_certificate:
 
@@ -2556,6 +2778,7 @@ def update_lesson_progress(user, lesson_id):
 
                     certificate = Certificate(
                         certificate_id=certificate_id,
+                        verification_id=secrets.token_urlsafe(32),
                         learner_id=learner.id,
                         course_id=course.id,
                         start_date=enrollment.enrolled_at or now,
@@ -2570,8 +2793,12 @@ def update_lesson_progress(user, lesson_id):
     return jsonify({
         "message": "Lesson progress updated",
         "lesson_id": lesson_id,
-        "completed": completed
+        "completed": bool(progress.completed),
+        "learning_time_seconds": (
+            progress.learning_time_seconds
+        )
     }), 200
+
 
 @api.get("/learner/courses/<string:course_id>/progress")
 @role_required("learner")
@@ -2612,9 +2839,14 @@ def get_course_progress(user, course_id):
     total_lessons = len(lesson_ids)
 
     if total_lessons == 0:
+
         percentage = 0
         completed_count = 0
+        total_course_duration = 0
+        total_learning_time = 0
+
     else:
+
         completed_count = (
             LessonProgress.query
             .filter(
@@ -2629,6 +2861,59 @@ def get_course_progress(user, course_id):
             (completed_count / total_lessons) * 100
         )
 
+        # ----------------------------------------------------
+        # Calculate course duration
+        # ----------------------------------------------------
+
+        total_course_duration = sum(
+            duration_to_seconds(lesson.duration)
+            for lesson in course_lessons
+        )
+
+        # ----------------------------------------------------
+        # Calculate validated learning time
+        # ----------------------------------------------------
+
+        progress_records = (
+            LessonProgress.query
+            .filter(
+                LessonProgress.learner_id == learner.id,
+                LessonProgress.lesson_id.in_(lesson_ids)
+            )
+            .all()
+        )
+
+        total_learning_time = 0
+
+        for record in progress_records:
+
+            lesson_duration = next(
+                (
+                    lesson.duration
+                    for lesson in course_lessons
+                    if lesson.id == record.lesson_id
+                ),
+                "00:00"
+            )
+
+            lesson_duration_seconds = (
+                duration_to_seconds(
+                    lesson_duration
+                )
+            )
+
+            validated_time = min(
+                record.learning_time_seconds or 0,
+                lesson_duration_seconds
+            )
+
+            total_learning_time += validated_time
+
+        total_learning_time = min(
+            total_learning_time,
+            total_course_duration
+        )
+
     enrollment = Enrollment.query.filter_by(
         learner_id=learner.id,
         course_id=course.id
@@ -2639,10 +2924,23 @@ def get_course_progress(user, course_id):
         "completed_lessons": completed_count,
         "total_lessons": total_lessons,
         "progress": percentage,
+        "total_learning_time_seconds": total_learning_time,
+        "total_course_duration_seconds": total_course_duration,
+        "learning_time_percentage": (
+            int(
+                (total_learning_time / total_course_duration)
+                * 100
+            )
+            if total_course_duration > 0
+            else 0
+        ),
         "enrolled": enrollment is not None,
-        "status": enrollment.status if enrollment else None
+        "status": (
+            enrollment.status
+            if enrollment
+            else None
+        )
     }), 200
-
 # ============================================================
 # LEARNER - LEADERBOARD
 # ============================================================
@@ -3125,11 +3423,10 @@ def learner_certificate_detail(
         "status": certificate.status
     })
 
-
-@api.get("/certificates/<string:certificate_number>")
-def verify_certificate(certificate_number):
+@api.get("/certificates/<string:verification_id>")
+def verify_certificate(verification_id):
     certificate = Certificate.query.filter_by(
-        certificate_id=certificate_number
+        verification_id=verification_id
     ).first()
 
     if not certificate:
@@ -3179,7 +3476,6 @@ def verify_certificate(certificate_number):
             "status": certificate.status
         }
     })
-
 
 # ============================================================
 # TRAINER — COURSE LEARNERS
