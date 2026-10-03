@@ -59,8 +59,6 @@ class User(db.Model):
     nullable=True
     )
 
-    
-
     created_at = db.Column(
         db.DateTime,
         default=datetime.utcnow
@@ -129,6 +127,11 @@ class Batch(db.Model):
     name = db.Column(
         db.String(100),
         nullable=False
+    )
+    course_id = db.Column(
+        db.String(80),
+        db.ForeignKey("course.id"),
+        nullable=True
     )
 
     start_date = db.Column(

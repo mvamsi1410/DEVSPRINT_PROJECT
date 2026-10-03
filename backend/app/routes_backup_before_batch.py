@@ -5,18 +5,12 @@ from flask import (
     send_from_directory,
     current_app,
 )
-import io
-import qrcode
-
-from flask import send_file
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
 import secrets
 import os
 import random
 import json
 import uuid
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 
 from werkzeug.utils import secure_filename
 
@@ -3362,10 +3356,13 @@ def learner_certificates(user):
         "certificates": result
     })
 
+
 @api.get("/learner/certificates/<int:certificate_id>")
 @role_required("learner")
-def learner_certificate_detail(user, certificate_id):
-
+def learner_certificate_detail(
+    user,
+    certificate_id
+):
     learner = Learner.query.filter_by(
         user_id=user.id
     ).first()
@@ -3396,16 +3393,35 @@ def learner_certificate_detail(user, certificate_id):
     return jsonify({
         "id": certificate.id,
         "certificate_id": certificate.certificate_id,
-        "verification_id": certificate.verification_id,
         "learner_id": learner.id,
-        "learner_name": learner_user.name if learner_user else None,
+        "learner_name": (
+            learner_user.name
+            if learner_user
+            else None
+        ),
         "course_id": certificate.course_id,
-        "course_title": course.title if course else None,
-        "issue_date": certificate.end_date.isoformat() if certificate.end_date else None,
-        "end_date": certificate.end_date.isoformat() if certificate.end_date else None,
+        "course_title": (
+            course.title
+            if course
+            else None
+        ),
+        "start_date": (
+            certificate.start_date.isoformat()
+            if certificate.start_date
+            else None
+        ),
+        "end_date": (
+            certificate.end_date.isoformat()
+            if certificate.end_date
+            else None
+        ),
+        "created_at": (
+            certificate.created_at.isoformat()
+            if certificate.created_at
+            else None
+        ),
         "status": certificate.status
-    }), 200
-
+    })
 
 @api.get("/certificates/<string:verification_id>")
 def verify_certificate(verification_id):
@@ -6644,42 +6660,28 @@ def admin_batches(user):
 def admin_create_batch(user):
     data = request.get_json(silent=True) or {}
 
-    name = str(data.get("name", "")).strip()
+    name = str(
+        data.get("name", "")
+    ).strip()
 
     if not name:
         return jsonify({
             "error": "Batch name is required"
         }), 400
 
-    course_id = data.get("course_id")
-    trainer_id = data.get("trainer_id")
-    start_date = data.get("start_date")
-    end_date = data.get("end_date")
-
     batch_data = {
-        "name": name,
-        "course_id": course_id,
-        "trainer_id": trainer_id,
-        "status": data.get("status", "active")
+        "name": name
     }
 
-    if start_date:
-        try:
-            batch_data["start_date"] = date.fromisoformat(start_date)
-        except ValueError:
-            return jsonify({
-                "error": "Invalid start_date. Use YYYY-MM-DD"
-            }), 400
+    if hasattr(Batch, "status"):
+        batch_data["status"] = data.get(
+            "status",
+            "active"
+        )
 
-    if end_date:
-        try:
-            batch_data["end_date"] = date.fromisoformat(end_date)
-        except ValueError:
-            return jsonify({
-                "error": "Invalid end_date. Use YYYY-MM-DD"
-            }), 400
-
-    batch = Batch(**batch_data)
+    batch = Batch(
+        **batch_data
+    )
 
     db.session.add(batch)
     db.session.commit()
@@ -6688,97 +6690,18 @@ def admin_create_batch(user):
         "message": "Batch created successfully",
         "batch": {
             "id": batch.id,
-            "name": batch.name,
-            "course_id": batch.course_id,
-            "trainer_id": batch.trainer_id,
-            "start_date": (
-                batch.start_date.isoformat()
-                if batch.start_date else None
+            "name": getattr(
+                batch,
+                "name",
+                None
             ),
-            "end_date": (
-                batch.end_date.isoformat()
-                if batch.end_date else None
-            ),
-            "status": batch.status
+            "status": getattr(
+                batch,
+                "status",
+                None
+            )
         }
     }), 201
-
-
-@api.post("/admin/batches/<int:batch_id>/learners")
-@role_required("admin")
-def admin_add_learner_to_batch(user, batch_id):
-    data = request.get_json(silent=True) or {}
-
-    learner_id = data.get("learner_id")
-
-    if not learner_id:
-        return jsonify({
-            "error": "learner_id is required"
-        }), 400
-
-    batch = Batch.query.get(batch_id)
-
-    if not batch:
-        return jsonify({
-            "error": "Batch not found"
-        }), 404
-
-    learner = Learner.query.get(learner_id)
-
-    if not learner:
-        return jsonify({
-            "error": "Learner not found"
-        }), 404
-
-    learner.batch_id = batch_id
-
-    db.session.commit()
-
-    return jsonify({
-        "message": "Learner added to batch successfully",
-        "batch_id": batch_id,
-        "learner_id": learner_id
-    }), 200
-
-
-@api.get("/admin/batches/<int:batch_id>/learners")
-@role_required("admin")
-def admin_batch_learners(user, batch_id):
-    batch = Batch.query.get(batch_id)
-
-    if not batch:
-        return jsonify({
-            "error": "Batch not found"
-        }), 404
-
-    learners = Learner.query.filter_by(
-        batch_id=batch_id
-    ).all()
-
-    result = []
-
-    for learner in learners:
-        learner_user = User.query.get(learner.user_id)
-
-        result.append({
-            "learner_id": learner.id,
-            "user_id": learner.user_id,
-            "name": (
-                learner_user.name
-                if learner_user
-                else None
-            ),
-            "email": (
-                learner_user.email
-                if learner_user
-                else None
-            )
-        })
-
-    return jsonify({
-        "batch_id": batch_id,
-        "learners": result
-    })
 
 
 @api.delete("/admin/batches/<int:batch_id>")
@@ -6817,405 +6740,6 @@ def admin_delete_batch(
     })
 
 
-# ============================================================
-# TRAINER — ATTENDANCE
-# ============================================================
-
-@api.get("/trainer/attendance")
-@role_required("trainer")
-def trainer_get_attendance(user):
-    batch_id = request.args.get("batch_id", type=int)
-    date_str = request.args.get("date")
-
-    if not batch_id or not date_str:
-        return jsonify({
-            "error": "batch_id and date are required"
-        }), 400
-
-    try:
-        attendance_date = date.fromisoformat(date_str)
-    except ValueError:
-        return jsonify({
-            "error": "Invalid date. Use YYYY-MM-DD"
-        }), 400
-
-    trainer = Trainer.query.filter_by(
-        user_id=user.id
-    ).first()
-
-    if not trainer:
-        return jsonify({
-            "error": "Trainer profile not found"
-        }), 404
-
-    batch = Batch.query.filter_by(
-        id=batch_id,
-        trainer_id=trainer.id
-    ).first()
-
-    if not batch:
-        return jsonify({
-            "error": "Batch not found or not assigned to this trainer"
-        }), 404
-
-    learners = Learner.query.filter_by(
-        batch_id=batch_id
-    ).all()
-
-    result = []
-
-    for learner in learners:
-        learner_user = User.query.get(
-            learner.user_id
-        )
-
-        attendance = Attendance.query.filter_by(
-            learner_id=learner.id,
-            batch_id=batch_id,
-            date=attendance_date
-        ).first()
-
-        result.append({
-            "learner_id": learner.id,
-            "name": (
-                learner_user.name
-                if learner_user
-                else None
-            ),
-            "email": (
-                learner_user.email
-                if learner_user
-                else None
-            ),
-            "status": (
-                attendance.status
-                if attendance
-                else None
-            ),
-            "attendance_id": (
-                attendance.id
-                if attendance
-                else None
-            )
-        })
-
-    return jsonify({
-        "batch_id": batch_id,
-        "date": attendance_date.isoformat(),
-        "learners": result
-    })
-
-
-@api.post("/trainer/attendance")
-@role_required("trainer")
-def trainer_save_attendance(user):
-    data = request.get_json(silent=True) or {}
-
-    batch_id = data.get("batch_id")
-    date_str = data.get("date")
-    records = data.get("records", [])
-
-    if not batch_id or not date_str:
-        return jsonify({
-            "error": "batch_id and date are required"
-        }), 400
-
-    if not isinstance(records, list):
-        return jsonify({
-            "error": "records must be a list"
-        }), 400
-
-    try:
-        attendance_date = date.fromisoformat(date_str)
-    except ValueError:
-        return jsonify({
-            "error": "Invalid date. Use YYYY-MM-DD"
-        }), 400
-
-    trainer = Trainer.query.filter_by(
-        user_id=user.id
-    ).first()
-
-    if not trainer:
-        return jsonify({
-            "error": "Trainer profile not found"
-        }), 404
-
-    batch = Batch.query.filter_by(
-        id=batch_id,
-        trainer_id=trainer.id
-    ).first()
-
-    if not batch:
-        return jsonify({
-            "error": "Batch not found or not assigned to this trainer"
-        }), 404
-
-    allowed_statuses = {
-        "present",
-        "absent",
-        "late"
-    }
-
-    for record in records:
-        learner_id = record.get("learner_id")
-        status = str(
-            record.get("status", "")
-        ).strip().lower()
-
-        if not learner_id:
-            return jsonify({
-                "error": "learner_id is required"
-            }), 400
-
-        if status not in allowed_statuses:
-            return jsonify({
-                "error": "Status must be present, absent or late"
-            }), 400
-
-        learner = Learner.query.filter_by(
-            id=learner_id,
-            batch_id=batch_id
-        ).first()
-
-        if not learner:
-            return jsonify({
-                "error": f"Learner {learner_id} does not belong to this batch"
-            }), 400
-
-        attendance = Attendance.query.filter_by(
-            learner_id=learner_id,
-            batch_id=batch_id,
-            date=attendance_date
-        ).first()
-
-        if attendance:
-            attendance.status = status
-            attendance.marked_by = user.id
-        else:
-            attendance = Attendance(
-                learner_id=learner_id,
-                batch_id=batch_id,
-                date=attendance_date,
-                status=status,
-                marked_by=user.id
-            )
-            db.session.add(attendance)
-
-    db.session.commit()
-
-    return jsonify({
-        "message": "Attendance saved successfully",
-        "batch_id": batch_id,
-        "date": attendance_date.isoformat(),
-        "records_saved": len(records)
-    }), 200
-#============================================
-
-# ============================================================
-# ADMIN — ATTENDANCE
-# ============================================================
-
-@api.get("/admin/attendance")
-@role_required("admin")
-def admin_get_attendance(user):
-    batch_id = request.args.get("batch_id", type=int)
-
-    query = Attendance.query
-
-    if batch_id:
-        query = query.filter_by(batch_id=batch_id)
-
-    records = query.order_by(
-        Attendance.date.desc(),
-        Attendance.id.desc()
-    ).all()
-
-    result = []
-
-    for attendance in records:
-        learner = Learner.query.get(
-            attendance.learner_id
-        )
-
-        learner_user = (
-            User.query.get(learner.user_id)
-            if learner
-            else None
-        )
-
-        result.append({
-            "id": attendance.id,
-            "learner_id": attendance.learner_id,
-            "learner_name": (
-                learner_user.name
-                if learner_user
-                else None
-            ),
-            "batch_id": attendance.batch_id,
-            "date": attendance.date.isoformat(),
-            "status": attendance.status,
-            "marked_by": attendance.marked_by
-        })
-
-    return jsonify({
-        "attendance": result
-    })
-
-
-@api.put("/admin/attendance/<int:attendance_id>")
-@role_required("admin")
-def admin_update_attendance(user, attendance_id):
-    attendance = Attendance.query.get(
-        attendance_id
-    )
-
-    if not attendance:
-        return jsonify({
-            "error": "Attendance record not found"
-        }), 404
-
-    data = request.get_json(silent=True) or {}
-
-    status = str(
-        data.get("status", "")
-    ).strip().lower()
-
-    allowed_statuses = {
-        "present",
-        "absent",
-        "late"
-    }
-
-    if status not in allowed_statuses:
-        return jsonify({
-            "error": "Status must be present, absent or late"
-        }), 400
-
-    attendance.status = status
-    attendance.marked_by = user.id
-
-    db.session.commit()
-
-    return jsonify({
-        "message": "Attendance updated successfully",
-        "attendance": {
-            "id": attendance.id,
-            "learner_id": attendance.learner_id,
-            "batch_id": attendance.batch_id,
-            "date": attendance.date.isoformat(),
-            "status": attendance.status,
-            "marked_by": attendance.marked_by
-        }
-    }), 200
-
-#===========================================
-
-@api.get("/admin/attendance/percentage")
-@role_required("admin")
-def admin_attendance_percentage(user):
-    batch_id = request.args.get("batch_id", type=int)
-
-    if not batch_id:
-        return jsonify({
-            "error": "batch_id is required"
-        }), 400
-
-    learners = Learner.query.filter_by(
-        batch_id=batch_id
-    ).all()
-
-    result = []
-
-    for learner in learners:
-        records = Attendance.query.filter_by(
-            learner_id=learner.id,
-            batch_id=batch_id
-        ).all()
-
-        total = len(records)
-
-        present = sum(
-            1 for record in records
-            if record.status in ["present", "late"]
-        )
-
-        percentage = (
-            round((present / total) * 100, 2)
-            if total > 0
-            else 0
-        )
-
-        learner_user = User.query.get(
-            learner.user_id
-        )
-
-        result.append({
-            "learner_id": learner.id,
-            "name": (
-                learner_user.name
-                if learner_user
-                else None
-            ),
-            "total_days": total,
-            "present_days": present,
-            "attendance_percentage": percentage
-        })
-
-    return jsonify({
-        "batch_id": batch_id,
-        "learners": result
-    })
-
-#========================================
-
-@api.get("/learner/attendance")
-@role_required("learner")
-def learner_get_attendance(user):
-    learner = Learner.query.filter_by(
-        user_id=user.id
-    ).first()
-
-    if not learner:
-        return jsonify({
-            "error": "Learner profile not found"
-        }), 404
-
-    records = Attendance.query.filter_by(
-        learner_id=learner.id
-    ).order_by(
-        Attendance.date.desc()
-    ).all()
-
-    result = []
-
-    for attendance in records:
-        result.append({
-            "id": attendance.id,
-            "batch_id": attendance.batch_id,
-            "date": attendance.date.isoformat(),
-            "status": attendance.status
-        })
-
-    total = len(records)
-
-    attended = sum(
-        1
-        for record in records
-        if record.status in ["present", "late"]
-    )
-
-    percentage = (
-        round((attended / total) * 100, 2)
-        if total > 0
-        else 0
-    )
-
-    return jsonify({
-        "learner_id": learner.id,
-        "attendance_percentage": percentage,
-        "attendance": result
-    })
 # ============================================================
 # DISCUSSIONS
 # ============================================================
