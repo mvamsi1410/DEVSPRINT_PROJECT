@@ -1,12 +1,15 @@
 from flask import (
     Blueprint,
     request,
+    Response,
     jsonify,
     send_from_directory,
     current_app,
 )
 import io
+import csv
 import qrcode
+from openpyxl import Workbook
 
 from flask import send_file
 from reportlab.pdfgen import canvas
@@ -2131,7 +2134,6 @@ def trainer_create_lesson(
 # =========================================================
 # LEARNER - ENROLL
 # =========================================================
-
 @api.post(
     "/courses/<course_id>/enroll"
 )
@@ -2146,18 +2148,14 @@ def enroll_course(
 
     if not learner:
         return jsonify({
-            "error":
-                "Learner profile not found"
+            "error": "Learner profile not found"
         }), 404
 
-    course = Course.query.get(
-        course_id
-    )
+    course = Course.query.get(course_id)
 
     if not course:
         return jsonify({
-            "error":
-                "Course not found"
+            "error": "Course not found"
         }), 404
 
     enrollment = (
@@ -2169,29 +2167,97 @@ def enroll_course(
         .first()
     )
 
-    if enrollment:
-        if enrollment.status != "active":
-            enrollment.status = "active"
-            db.session.commit()
+    # --------------------------------------------------------
+    # EXISTING ENROLLMENT
+    # --------------------------------------------------------
 
+    if enrollment:
+
+        # Already fully paid
+        if enrollment.payment_status == "paid":
+            return jsonify({
+                "message": "Already enrolled in this course",
+                "enrollment": {
+                    "id": enrollment.id,
+                    "course_id": enrollment.course_id,
+                    "progress": enrollment.progress or 0,
+                    "status": "active",
+                    "total_fee": enrollment.total_fee,
+                    "amount_paid": enrollment.amount_paid,
+                    "pending_amount": (
+                        enrollment.total_fee -
+                        enrollment.amount_paid
+                    ),
+                    "payment_status":
+                        enrollment.payment_status,
+                },
+            })
+
+        # Payment is still pending
         return jsonify({
             "message":
-                "Already enrolled in this course",
+                "Payment required to activate enrollment",
             "enrollment": {
                 "id": enrollment.id,
                 "course_id": enrollment.course_id,
-                "progress":
-                    enrollment.progress or 0,
-                "status":
-                    enrollment.status,
+                "progress": enrollment.progress or 0,
+                "status": "pending",
+                "total_fee": enrollment.total_fee,
+                "amount_paid": enrollment.amount_paid,
+                "pending_amount": (
+                    enrollment.total_fee -
+                    enrollment.amount_paid
+                ),
+                "payment_status":
+                    enrollment.payment_status,
             },
-        })
+        }), 402
+
+    # --------------------------------------------------------
+    # FREE COURSE
+    # --------------------------------------------------------
+
+    if (course.fee or 0) <= 0:
+
+        enrollment = Enrollment(
+            learner_id=learner.id,
+            course_id=course.id,
+            progress=0,
+            status="active",
+            total_fee=0,
+            amount_paid=0,
+            payment_status="paid",
+        )
+
+        db.session.add(enrollment)
+        db.session.commit()
+
+        return jsonify({
+            "message": "Free course enrolled successfully",
+            "enrollment": {
+                "id": enrollment.id,
+                "course_id": enrollment.course_id,
+                "progress": 0,
+                "status": "active",
+                "total_fee": 0,
+                "amount_paid": 0,
+                "pending_amount": 0,
+                "payment_status": "paid",
+            },
+        }), 201
+
+    # --------------------------------------------------------
+    # PAID COURSE
+    # --------------------------------------------------------
 
     enrollment = Enrollment(
         learner_id=learner.id,
         course_id=course.id,
         progress=0,
-        status="active",
+        status="pending",
+        total_fee=course.fee,
+        amount_paid=0,
+        payment_status="pending",
     )
 
     db.session.add(enrollment)
@@ -2199,16 +2265,19 @@ def enroll_course(
 
     return jsonify({
         "message":
-            "Course enrolled successfully",
+            "Payment required before course activation",
         "enrollment": {
             "id": enrollment.id,
             "course_id": enrollment.course_id,
             "progress": 0,
-            "status": enrollment.status,
+            "status": "pending",
+            "total_fee": enrollment.total_fee,
+            "amount_paid": enrollment.amount_paid,
+            "pending_amount": enrollment.total_fee,
+            "payment_status":
+                enrollment.payment_status,
         },
-    }), 201
-
-
+    }), 402
 # =========================================================
 # LEARNER - MY LEARNING
 # =========================================================
@@ -3650,6 +3719,369 @@ def trainer_learner_progress(
             for lesson in lessons
         ]
     })
+
+#=============================================================
+# # ============================================================
+# TRAINER — ALL STUDENTS
+# ============================================================
+# ============================================================
+# TRAINER — ALL STUDENTS
+# ============================================================
+
+@api.get("/trainer/students")
+@role_required("trainer")
+def trainer_students(user):
+
+    # Search parameter
+    search = request.args.get(
+        "search",
+        ""
+    ).strip().lower()
+
+    # Needs attention filter
+    needs_attention_filter = request.args.get(
+        "needs_attention",
+        ""
+    ).strip().lower()
+
+    trainer = Trainer.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not trainer:
+        return jsonify({
+            "error": "Trainer profile not found"
+        }), 404
+
+    # Get all courses belonging to this trainer
+    courses = Course.query.filter_by(
+        trainer_id=trainer.id
+    ).all()
+
+    course_ids = [
+        course.id
+        for course in courses
+    ]
+
+    if not course_ids:
+        return jsonify({
+            "total_students": 0,
+            "students": []
+        }), 200
+
+    # Get enrollments from trainer's courses
+    enrollments = Enrollment.query.filter(
+        Enrollment.course_id.in_(course_ids)
+    ).all()
+
+    students = {}
+
+    for enrollment in enrollments:
+
+        learner = Learner.query.get(
+            enrollment.learner_id
+        )
+
+        if not learner:
+            continue
+
+        learner_user = User.query.get(
+            learner.user_id
+        )
+
+        if not learner_user:
+            continue
+
+        learner_id = learner.id
+
+        if learner_id not in students:
+
+            students[learner_id] = {
+                "learner_id": learner_id,
+                "name": learner_user.name,
+                "email": learner_user.email,
+                "courses": [],
+                "total_progress": 0,
+                "course_count": 0,
+                "last_active": None,
+                "_last_active_dt": None,
+                "quiz_scores": [],
+                "coding_scores": []
+            }
+
+        student = students[learner_id]
+
+        # -----------------------------------------
+        # Course information
+        # -----------------------------------------
+
+        course = Course.query.get(
+            enrollment.course_id
+        )
+
+        if course:
+
+            student["courses"].append({
+                "course_id": course.id,
+                "course_title": course.title,
+                "progress": int(
+                    enrollment.progress or 0
+                ),
+                "status": enrollment.status
+            })
+
+        student["total_progress"] += int(
+            enrollment.progress or 0
+        )
+
+        student["course_count"] += 1
+
+        # -----------------------------------------
+        # Last active from lesson progress
+        # -----------------------------------------
+
+        progress_records = LessonProgress.query.filter_by(
+            learner_id=learner_id
+        ).order_by(
+            LessonProgress.updated_at.desc()
+        ).all()
+
+        if progress_records:
+
+            latest_activity = (
+                progress_records[0].updated_at
+            )
+
+            if latest_activity:
+
+                if (
+                    student["_last_active_dt"] is None
+                    or latest_activity >
+                    student["_last_active_dt"]
+                ):
+
+                    student["_last_active_dt"] = (
+                        latest_activity
+                    )
+
+                    student["last_active"] = (
+                        latest_activity.isoformat()
+                    )
+
+        # -----------------------------------------
+        # Quiz scores for this course
+        # -----------------------------------------
+
+        quizzes = Quiz.query.filter_by(
+            course_id=enrollment.course_id
+        ).all()
+
+        for quiz in quizzes:
+
+            attempts = QuizAttempt.query.filter_by(
+                quiz_id=quiz.id,
+                learner_id=learner_id
+            ).all()
+
+            for attempt in attempts:
+
+                if (
+                    attempt.total
+                    and attempt.total > 0
+                ):
+
+                    percentage = (
+                        attempt.score /
+                        attempt.total
+                    ) * 100
+
+                    student["quiz_scores"].append(
+                        percentage
+                    )
+
+        # -----------------------------------------
+        # Coding scores for this course
+        # -----------------------------------------
+
+        coding_exams = CodingExam.query.filter_by(
+            course_id=enrollment.course_id
+        ).all()
+
+        for exam in coding_exams:
+
+            submissions = CodingSubmission.query.filter_by(
+                exam_id=exam.id,
+                learner_id=learner_id
+            ).all()
+
+            for submission in submissions:
+
+                if (
+                    exam.total_marks
+                    and exam.total_marks > 0
+                ):
+
+                    percentage = (
+                        submission.score /
+                        exam.total_marks
+                    ) * 100
+
+                    student["coding_scores"].append(
+                        percentage
+                    )
+
+    # ========================================================
+    # SEARCH
+    # ========================================================
+
+    if search:
+
+        students = {
+            learner_id: student
+            for learner_id, student in students.items()
+            if (
+                search in student["name"].lower()
+                or search in student["email"].lower()
+            )
+        }
+
+    # ========================================================
+    # BUILD RESULT
+    # ========================================================
+
+    result = []
+
+    for student in students.values():
+
+        # -----------------------------------------
+        # Average progress
+        # -----------------------------------------
+
+        if student["course_count"] > 0:
+
+            average_progress = (
+                student["total_progress"]
+                / student["course_count"]
+            )
+
+        else:
+
+            average_progress = 0
+
+        # -----------------------------------------
+        # Average quiz score
+        # -----------------------------------------
+
+        if student["quiz_scores"]:
+
+            average_quiz_score = (
+                sum(student["quiz_scores"])
+                / len(student["quiz_scores"])
+            )
+
+        else:
+
+            average_quiz_score = 0
+
+        # -----------------------------------------
+        # Average coding score
+        # -----------------------------------------
+
+        if student["coding_scores"]:
+
+            average_coding_score = (
+                sum(student["coding_scores"])
+                / len(student["coding_scores"])
+            )
+
+        else:
+
+            average_coding_score = 0
+
+        # -----------------------------------------
+        # Needs attention
+        # -----------------------------------------
+
+        needs_attention = (
+            average_progress < 40
+            or (
+                student["quiz_scores"]
+                and average_quiz_score < 50
+            )
+        )
+
+        result.append({
+
+            "learner_id":
+                student["learner_id"],
+
+            "name":
+                student["name"],
+
+            "email":
+                student["email"],
+
+            "courses":
+                student["courses"],
+
+            "average_progress":
+                round(
+                    average_progress,
+                    2
+                ),
+
+            "last_active":
+                student["last_active"],
+
+            "average_quiz_score":
+                round(
+                    average_quiz_score,
+                    2
+                ),
+
+            "average_coding_score":
+                round(
+                    average_coding_score,
+                    2
+                ),
+
+            "needs_attention":
+                bool(needs_attention)
+        })
+
+    # ========================================================
+    # NEEDS ATTENTION FILTER
+    # ========================================================
+
+    if needs_attention_filter == "true":
+
+        result = [
+            student
+            for student in result
+            if student["needs_attention"] is True
+        ]
+
+    elif needs_attention_filter == "false":
+
+        result = [
+            student
+            for student in result
+            if student["needs_attention"] is False
+        ]
+
+    # ========================================================
+    # FINAL RESPONSE
+    # ========================================================
+
+    return jsonify({
+
+        "total_students":
+            len(result),
+
+        "students":
+            result
+
+    }), 200#
 # ============================================================
 # ASSIGNMENTS
 # ============================================================
@@ -3880,7 +4312,316 @@ def trainer_delete_assignment(
     return jsonify({
         "message": "Assignment deleted successfully"
     })
+#============================================================
+# =========================================================
+# TRAINER ANALYTICS
+# =========================================================
 
+@api.get("/trainer/analytics")
+@role_required("trainer")
+def trainer_analytics(user):
+    trainer = Trainer.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not trainer:
+        return jsonify({
+            "error": "Trainer profile not found"
+        }), 404
+
+    courses = Course.query.filter_by(
+        trainer_id=trainer.id
+    ).all()
+
+    course_ids = [
+        course.id
+        for course in courses
+    ]
+
+    if not course_ids:
+        return jsonify({
+            "lesson_drop_off": [],
+            "quiz_question_analysis": [],
+            "assignment_analysis": []
+        })
+
+    # =====================================================
+    # 1. LESSON DROP-OFF
+    # =====================================================
+
+    lesson_drop_off = []
+
+    for course in courses:
+
+        modules = Module.query.filter_by(
+            course_id=course.id
+        ).order_by(
+            Module.id.asc()
+        ).all()
+
+        for module in modules:
+
+            lessons = Lesson.query.filter_by(
+                module_id=module.id
+            ).order_by(
+                Lesson.order_no.asc()
+            ).all()
+
+            for lesson in lessons:
+
+                enrolled_learners = Enrollment.query.filter_by(
+                    course_id=course.id
+                ).count()
+
+                completed_learners = LessonProgress.query.filter_by(
+                    lesson_id=lesson.id,
+                    completed=True
+                ).count()
+
+                if enrolled_learners > 0:
+
+                    completion_rate = (
+                        completed_learners /
+                        enrolled_learners
+                    ) * 100
+
+                    drop_off_rate = (
+                        100 -
+                        completion_rate
+                    )
+
+                else:
+
+                    completion_rate = 0
+                    drop_off_rate = 0
+
+                lesson_drop_off.append({
+
+                    "course_id":
+                        course.id,
+
+                    "course_title":
+                        course.title,
+
+                    "module_id":
+                        module.id,
+
+                    "lesson_id":
+                        lesson.id,
+
+                    "lesson_title":
+                        lesson.title,
+
+                    "order_no":
+                        lesson.order_no,
+
+                    "enrolled_learners":
+                        enrolled_learners,
+
+                    "completed_learners":
+                        completed_learners,
+
+                    "completion_rate":
+                        round(
+                            completion_rate,
+                            2
+                        ),
+
+                    "drop_off_rate":
+                        round(
+                            drop_off_rate,
+                            2
+                        )
+                })
+
+    # =====================================================
+    # 2. QUIZ QUESTION ANALYSIS
+    # =====================================================
+
+    quiz_question_analysis = []
+
+    quizzes = Quiz.query.filter(
+        Quiz.course_id.in_(course_ids)
+    ).all()
+
+    for quiz in quizzes:
+
+        questions = Question.query.filter_by(
+            quiz_id=quiz.id
+        ).all()
+
+        for question in questions:
+
+            answers = QuizAnswer.query.filter_by(
+                question_id=question.id
+            ).all()
+
+            total_answers = len(answers)
+
+            correct_answers = sum(
+                1
+                for answer in answers
+                if answer.is_correct
+            )
+
+            wrong_answers = (
+                total_answers -
+                correct_answers
+            )
+
+            if total_answers > 0:
+
+                wrong_percentage = (
+                    wrong_answers /
+                    total_answers
+                ) * 100
+
+            else:
+
+                wrong_percentage = 0
+
+            quiz_question_analysis.append({
+
+                "course_id":
+                    quiz.course_id,
+
+                "quiz_id":
+                    quiz.id,
+
+                "quiz_title":
+                    quiz.title,
+
+                "question_id":
+                    question.id,
+
+                "question":
+                    question.question_text,
+
+                "total_answers":
+                    total_answers,
+
+                "correct_answers":
+                    correct_answers,
+
+                "wrong_answers":
+                    wrong_answers,
+
+                "wrong_percentage":
+                    round(
+                        wrong_percentage,
+                        2
+                    )
+            })
+
+    # =====================================================
+    # 3. ASSIGNMENT ANALYSIS
+    # =====================================================
+
+    assignment_analysis = []
+
+    assignments = Assignment.query.filter(
+        Assignment.course_id.in_(course_ids)
+    ).all()
+
+    for assignment in assignments:
+
+        enrolled_learners = Enrollment.query.filter_by(
+            course_id=assignment.course_id
+        ).all()
+
+        submissions = AssignmentSubmission.query.filter_by(
+            assignment_id=assignment.id
+        ).all()
+
+        submission_map = {
+            submission.learner_id:
+                submission
+            for submission in submissions
+        }
+
+        on_time = 0
+        late = 0
+        missing = 0
+
+        for enrollment in enrolled_learners:
+
+            submission = submission_map.get(
+                enrollment.learner_id
+            )
+
+            if not submission:
+
+                missing += 1
+
+            elif (
+                assignment.due_date
+                and submission.submitted_at
+                and submission.submitted_at <=
+                assignment.due_date
+            ):
+
+                on_time += 1
+
+            elif (
+                assignment.due_date
+                and submission.submitted_at
+                and submission.submitted_at >
+                assignment.due_date
+            ):
+
+                late += 1
+
+            else:
+
+                on_time += 1
+
+        assignment_analysis.append({
+
+            "assignment_id":
+                assignment.id,
+
+            "course_id":
+                assignment.course_id,
+
+            "title":
+                assignment.title,
+
+            "due_date":
+                (
+                    assignment.due_date.isoformat()
+                    if assignment.due_date
+                    else None
+                ),
+
+            "enrolled_learners":
+                len(enrolled_learners),
+
+            "on_time":
+                on_time,
+
+            "late":
+                late,
+
+            "missing":
+                missing
+        })
+
+    # =====================================================
+    # FINAL RESPONSE
+    # =====================================================
+
+    return jsonify({
+
+        "lesson_drop_off":
+            lesson_drop_off,
+
+        "quiz_question_analysis":
+            quiz_question_analysis,
+
+        "assignment_analysis":
+            assignment_analysis
+
+    }), 200
 
 # ------------------------------------------------------------
 # LEARNER ASSIGNMENTS
@@ -6328,8 +7069,1095 @@ def serve_uploaded_file(filename):
         upload_folder,
         filename
     )
+#=======================
+
+# ============================================================
+# PAYMENTS
+# ============================================================
+
+@api.post("/learner/payments")
+@role_required("learner")
+def create_payment(user):
+
+    data = request.get_json(silent=True) or {}
+
+    course_id = data.get("course_id")
+    amount = data.get("amount")
+    payment_method = data.get("payment_method", "cash")
+
+    if not course_id or amount is None:
+        return jsonify({
+            "error": "course_id and amount are required"
+        }), 400
+
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return jsonify({
+            "error": "Invalid payment amount"
+        }), 400
+
+    if amount <= 0:
+        return jsonify({
+            "error": "Payment amount must be greater than 0"
+        }), 400
+
+    learner = Learner.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not learner:
+        return jsonify({
+            "error": "Learner profile not found"
+        }), 404
+
+    course = Course.query.get(course_id)
+
+    if not course:
+        return jsonify({
+            "error": "Course not found"
+        }), 404
+
+    # ------------------------------------------------
+    # Free course
+    # ------------------------------------------------
+
+    if (course.fee or 0) <= 0:
+        return jsonify({
+            "error": "This course is free"
+        }), 400
+
+    # ------------------------------------------------
+    # Find existing enrollment
+    # ------------------------------------------------
+
+    enrollment = Enrollment.query.filter_by(
+        learner_id=learner.id,
+        course_id=course.id
+    ).first()
+
+    if not enrollment:
+
+        enrollment = Enrollment(
+            learner_id=learner.id,
+            course_id=course.id,
+            progress=0,
+            status="pending",
+            total_fee=course.fee,
+            amount_paid=0,
+            payment_status="pending"
+        )
+
+        db.session.add(enrollment)
+        db.session.flush()
+
+    # ------------------------------------------------
+    # Calculate remaining amount
+    # ------------------------------------------------
+
+    remaining = (
+        (enrollment.total_fee or course.fee)
+        - (enrollment.amount_paid or 0)
+    )
+
+    if amount > remaining:
+        return jsonify({
+            "error": "Payment amount exceeds pending amount",
+            "pending_amount": remaining
+        }), 400
+
+    # ------------------------------------------------
+    # Create payment
+    # ------------------------------------------------
+
+    payment = Payment(
+        learner_id=learner.id,
+        course_id=course.id,
+        enrollment_id=enrollment.id,
+        amount=amount,
+        payment_method=payment_method,
+        status="paid"
+    )
+
+    db.session.add(payment)
+    db.session.flush()
+
+    # ------------------------------------------------
+    # Update enrollment payment details
+    # ------------------------------------------------
+
+    enrollment.amount_paid = (
+        enrollment.amount_paid or 0
+    ) + amount
+
+    enrollment.total_fee = (
+        enrollment.total_fee or course.fee
+    )
+
+    if enrollment.amount_paid >= enrollment.total_fee:
+
+        enrollment.amount_paid = enrollment.total_fee
+        enrollment.payment_status = "paid"
+        enrollment.status = "active"
+
+    else:
+
+        enrollment.payment_status = "partial"
+        enrollment.status = "pending"
+
+    # ------------------------------------------------
+    # Create invoice
+    # ------------------------------------------------
+
+    invoice = Invoice(
+        learner_id=learner.id,
+        invoice_number=(
+            f"INV-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            f"-{payment.id}"
+        ),
+        amount=amount,
+        payment_id=payment.id,
+        course_id=course.id,
+        status="paid"
+    )
+
+    db.session.add(invoice)
+
+    db.session.commit()
+
+    return jsonify({
+        "message": "Payment recorded successfully",
+
+        "payment": {
+            "id": payment.id,
+            "amount": payment.amount,
+            "payment_method": payment.payment_method,
+            "status": payment.status
+        },
+
+        "invoice": {
+            "id": invoice.id,
+            "invoice_number": invoice.invoice_number,
+            "amount": invoice.amount,
+            "status": invoice.status
+        },
+
+        "enrollment": {
+            "id": enrollment.id,
+            "course_id": enrollment.course_id,
+            "total_fee": enrollment.total_fee,
+            "amount_paid": enrollment.amount_paid,
+            "pending_amount": (
+                enrollment.total_fee -
+                enrollment.amount_paid
+            ),
+            "payment_status": enrollment.payment_status,
+            "status": enrollment.status
+        }
+    }), 201
+
+#============================================================
+# ============================================================
+# ADMIN — PENDING DUES
+# ============================================================
+
+@api.get("/admin/payments/pending-dues")
+@role_required("admin")
+def get_pending_dues(user):
+
+    enrollments = Enrollment.query.filter(
+        Enrollment.total_fee > Enrollment.amount_paid
+    ).all()
+
+    dues = []
+
+    for enrollment in enrollments:
+
+        learner = Learner.query.get(enrollment.learner_id)
+        course = Course.query.get(enrollment.course_id)
+
+        if not learner or not course:
+            continue
+
+        learner_user = learner.user
+
+        dues.append({
+            "enrollment_id": enrollment.id,
+            "learner_id": learner.id,
+            "learner_name": learner_user.name,
+            "learner_email": learner_user.email,
+            "learner_mobile": learner_user.mobile,
+            "course_id": course.id,
+            "course_name": course.title,
+            "total_fee": enrollment.total_fee,
+            "amount_paid": enrollment.amount_paid,
+            "pending_amount": (
+                enrollment.total_fee -
+                enrollment.amount_paid
+            ),
+            "payment_status": enrollment.payment_status,
+            "enrollment_status": enrollment.status
+        })
+
+    return jsonify({
+        "count": len(dues),
+        "pending_dues": dues
+    }), 200
 
 
+#=============================================================
+
+# ============================================================
+# ADMIN — REPORTS OVERVIEW
+# ============================================================
+
+@api.get("/reports/admin/overview")
+@role_required("admin")
+def admin_reports_overview(user):
+
+    total_learners = Learner.query.count()
+    total_courses = Course.query.count()
+    total_enrollments = Enrollment.query.count()
+
+    completed_enrollments = Enrollment.query.filter(
+        Enrollment.progress >= 100
+    ).count()
+
+    if total_enrollments > 0:
+        completion_rate = (
+            completed_enrollments /
+            total_enrollments
+        ) * 100
+    else:
+        completion_rate = 0
+
+    quiz_attempts = QuizAttempt.query.all()
+
+    quiz_scores = []
+
+    for attempt in quiz_attempts:
+        if attempt.total and attempt.total > 0:
+            quiz_scores.append(
+                (attempt.score / attempt.total) * 100
+            )
+
+    if quiz_scores:
+        average_quiz_score = (
+            sum(quiz_scores) /
+            len(quiz_scores)
+        )
+    else:
+        average_quiz_score = 0
+
+    coding_submissions = CodingSubmission.query.all()
+
+    coding_scores = []
+
+    for submission in coding_submissions:
+
+        exam = CodingExam.query.get(
+            submission.exam_id
+        )
+
+        if not exam or not exam.total_marks:
+            continue
+
+        coding_scores.append(
+            (submission.score / exam.total_marks) * 100
+        )
+
+    if coding_scores:
+        average_coding_score = (
+            sum(coding_scores) /
+            len(coding_scores)
+        )
+    else:
+        average_coding_score = 0
+
+    return jsonify({
+        "total_learners": total_learners,
+        "total_courses": total_courses,
+        "total_enrollments": total_enrollments,
+        "completed_enrollments":
+            completed_enrollments,
+        "completion_rate":
+            round(completion_rate, 2),
+        "average_quiz_score":
+            round(average_quiz_score, 2),
+        "average_coding_score":
+            round(average_coding_score, 2)
+    }), 200
+#============================================================
+# ============================================================
+# ADMIN — GROWTH REPORT
+# ============================================================
+
+@api.get("/admin/growth")
+@role_required("admin")
+def admin_growth(user):
+
+    users = User.query.all()
+    enrollments = Enrollment.query.all()
+
+    growth = {}
+
+    # New user sign-ups
+    for u in users:
+
+        if not u.created_at:
+            continue
+
+        month = u.created_at.strftime("%Y-%m")
+
+        if month not in growth:
+            growth[month] = {
+                "new_signups": 0,
+                "new_enrollments": 0
+            }
+
+        growth[month]["new_signups"] += 1
+
+    # New enrollments
+    for e in enrollments:
+
+        if not e.enrolled_at:
+            continue
+
+        month = e.enrolled_at.strftime("%Y-%m")
+
+        if month not in growth:
+            growth[month] = {
+                "new_signups": 0,
+                "new_enrollments": 0
+            }
+
+        growth[month]["new_enrollments"] += 1
+
+    result = []
+
+    for month in sorted(growth.keys()):
+
+        result.append({
+            "month": month,
+            "new_signups": growth[month]["new_signups"],
+            "new_enrollments":
+                growth[month]["new_enrollments"]
+        })
+
+    return jsonify(result), 200
+#============================================================
+# ============================================================
+# ADMIN — COURSE ANALYTICS
+# ============================================================
+
+@api.get("/reports/admin/courses")
+@role_required("admin")
+def admin_course_analytics(user):
+
+    courses = Course.query.all()
+
+    result = []
+
+    for course in courses:
+
+        enrollments = Enrollment.query.filter_by(
+            course_id=course.id
+        ).all()
+
+        total_enrollments = len(enrollments)
+
+        completed = 0
+
+        for enrollment in enrollments:
+            if enrollment.progress >= 100:
+                completed += 1
+
+        if total_enrollments > 0:
+            completion_rate = (
+                completed / total_enrollments
+            ) * 100
+        else:
+            completion_rate = 0
+
+        # -----------------------------
+        # Average Quiz Score
+        # -----------------------------
+
+        quizzes = Quiz.query.filter_by(
+            course_id=course.id
+        ).all()
+
+        quiz_scores = []
+
+        for quiz in quizzes:
+
+            attempts = QuizAttempt.query.filter_by(
+                quiz_id=quiz.id
+            ).all()
+
+            for attempt in attempts:
+
+                if attempt.total and attempt.total > 0:
+
+                    score_percentage = (
+                        attempt.score /
+                        attempt.total
+                    ) * 100
+
+                    quiz_scores.append(
+                        score_percentage
+                    )
+
+        if quiz_scores:
+            average_quiz_score = (
+                sum(quiz_scores) /
+                len(quiz_scores)
+            )
+        else:
+            average_quiz_score = 0
+
+        # -----------------------------
+        # Average Coding Score
+        # -----------------------------
+
+        coding_exams = CodingExam.query.filter_by(
+            course_id=course.id
+        ).all()
+
+        coding_scores = []
+
+        for exam in coding_exams:
+
+            submissions = CodingSubmission.query.filter_by(
+                exam_id=exam.id
+            ).all()
+
+            for submission in submissions:
+
+                if exam.total_marks and exam.total_marks > 0:
+
+                    score_percentage = (
+                        submission.score /
+                        exam.total_marks
+                    ) * 100
+
+                    coding_scores.append(
+                        score_percentage
+                    )
+
+        if coding_scores:
+            average_coding_score = (
+                sum(coding_scores) /
+                len(coding_scores)
+            )
+        else:
+            average_coding_score = 0
+
+        result.append({
+            "course_id": course.id,
+            "course_title": course.title,
+            "total_enrollments":
+                total_enrollments,
+            "completed_learners":
+                completed,
+            "completion_rate":
+                round(completion_rate, 2),
+            "average_quiz_score":
+                round(average_quiz_score, 2),
+            "average_coding_score":
+                round(average_coding_score, 2)
+        })
+
+    return jsonify(result), 200
+#=============================================================
+# ============================================================
+# ADMIN — TRAINER PERFORMANCE
+# ============================================================
+
+@api.get("/reports/admin/trainers")
+@role_required("admin")
+def admin_trainer_performance(user):
+
+    trainers = Trainer.query.all()
+
+    result = []
+
+    for trainer in trainers:
+
+        courses = Course.query.filter_by(
+            trainer_id=trainer.id
+        ).all()
+
+        total_courses = len(courses)
+
+        total_enrollments = 0
+        completed_learners = 0
+
+        quiz_scores = []
+        coding_scores = []
+
+        for course in courses:
+
+            # -----------------------------
+            # Enrollments
+            # -----------------------------
+
+            enrollments = Enrollment.query.filter_by(
+                course_id=course.id
+            ).all()
+
+            total_enrollments += len(enrollments)
+
+            for enrollment in enrollments:
+
+                if enrollment.progress >= 100:
+                    completed_learners += 1
+
+            # -----------------------------
+            # Quiz Scores
+            # -----------------------------
+
+            quizzes = Quiz.query.filter_by(
+                course_id=course.id
+            ).all()
+
+            for quiz in quizzes:
+
+                attempts = QuizAttempt.query.filter_by(
+                    quiz_id=quiz.id
+                ).all()
+
+                for attempt in attempts:
+
+                    if attempt.total and attempt.total > 0:
+
+                        score = (
+                            attempt.score /
+                            attempt.total
+                        ) * 100
+
+                        quiz_scores.append(score)
+
+            # -----------------------------
+            # Coding Scores
+            # -----------------------------
+
+            coding_exams = CodingExam.query.filter_by(
+                course_id=course.id
+            ).all()
+
+            for exam in coding_exams:
+
+                submissions = CodingSubmission.query.filter_by(
+                    exam_id=exam.id
+                ).all()
+
+                for submission in submissions:
+
+                    if exam.total_marks and exam.total_marks > 0:
+
+                        score = (
+                            submission.score /
+                            exam.total_marks
+                        ) * 100
+
+                        coding_scores.append(score)
+
+        # -----------------------------
+        # Completion Rate
+        # -----------------------------
+
+        if total_enrollments > 0:
+            completion_rate = (
+                completed_learners /
+                total_enrollments
+            ) * 100
+        else:
+            completion_rate = 0
+
+        # -----------------------------
+        # Average Quiz Score
+        # -----------------------------
+
+        if quiz_scores:
+            average_quiz_score = (
+                sum(quiz_scores) /
+                len(quiz_scores)
+            )
+        else:
+            average_quiz_score = 0
+
+        # -----------------------------
+        # Average Coding Score
+        # -----------------------------
+
+        if coding_scores:
+            average_coding_score = (
+                sum(coding_scores) /
+                len(coding_scores)
+            )
+        else:
+            average_coding_score = 0
+
+        # Trainer name
+        trainer_name = "Unknown"
+
+        if trainer.user:
+            trainer_name = trainer.user.name
+
+        result.append({
+            "trainer_id": trainer.id,
+            "trainer_name": trainer_name,
+            "total_courses": total_courses,
+            "total_enrollments":
+                total_enrollments,
+            "completed_learners":
+                completed_learners,
+            "completion_rate":
+                round(completion_rate, 2),
+            "average_quiz_score":
+                round(average_quiz_score, 2),
+            "average_coding_score":
+                round(average_coding_score, 2)
+        })
+
+    return jsonify(result), 200
+#============================================================
+# ============================================================
+# ADMIN — COURSE REPORT CSV EXPORT
+# ============================================================
+
+@api.get("/admin/export/courses")
+@role_required("admin")
+def export_course_report(user):
+
+    courses = Course.query.all()
+
+    output = io.StringIO()
+
+    writer = csv.writer(output)
+
+    writer.writerow([
+        "Course ID",
+        "Course Title",
+        "Total Enrollments",
+        "Completed Learners",
+        "Completion Rate",
+        "Average Quiz Score",
+        "Average Coding Score"
+    ])
+
+    for course in courses:
+
+        enrollments = Enrollment.query.filter_by(
+            course_id=course.id
+        ).all()
+
+        total_enrollments = len(enrollments)
+
+        completed = 0
+
+        for enrollment in enrollments:
+            if enrollment.progress >= 100:
+                completed += 1
+
+        if total_enrollments > 0:
+            completion_rate = (
+                completed / total_enrollments
+            ) * 100
+        else:
+            completion_rate = 0
+
+        # Quiz scores
+        quizzes = Quiz.query.filter_by(
+            course_id=course.id
+        ).all()
+
+        quiz_scores = []
+
+        for quiz in quizzes:
+
+            attempts = QuizAttempt.query.filter_by(
+                quiz_id=quiz.id
+            ).all()
+
+            for attempt in attempts:
+
+                if attempt.total and attempt.total > 0:
+
+                    score = (
+                        attempt.score /
+                        attempt.total
+                    ) * 100
+
+                    quiz_scores.append(score)
+
+        if quiz_scores:
+            average_quiz_score = (
+                sum(quiz_scores) /
+                len(quiz_scores)
+            )
+        else:
+            average_quiz_score = 0
+
+        # Coding scores
+        coding_exams = CodingExam.query.filter_by(
+            course_id=course.id
+        ).all()
+
+        coding_scores = []
+
+        for exam in coding_exams:
+
+            submissions = CodingSubmission.query.filter_by(
+                exam_id=exam.id
+            ).all()
+
+            for submission in submissions:
+
+                if exam.total_marks and exam.total_marks > 0:
+
+                    score = (
+                        submission.score /
+                        exam.total_marks
+                    ) * 100
+
+                    coding_scores.append(score)
+
+        if coding_scores:
+            average_coding_score = (
+                sum(coding_scores) /
+                len(coding_scores)
+            )
+        else:
+            average_coding_score = 0
+
+        writer.writerow([
+            course.id,
+            course.title,
+            total_enrollments,
+            completed,
+            round(completion_rate, 2),
+            round(average_quiz_score, 2),
+            round(average_coding_score, 2)
+        ])
+
+    response = Response(
+        output.getvalue(),
+        mimetype="text/csv"
+    )
+
+    response.headers["Content-Disposition"] = (
+        "attachment; filename=course_report.csv"
+    )
+
+    return response
+
+#=============================================================
+# ============================================================
+# TRAINER — REPORTS OVERVIEW
+# ============================================================
+
+@api.get("/reports/trainer/overview")
+@role_required("trainer")
+def trainer_reports_overview(user):
+
+    trainer = Trainer.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not trainer:
+        return jsonify({
+            "message": "Trainer profile not found"
+        }), 404
+
+    courses = Course.query.filter_by(
+        trainer_id=trainer.id
+    ).all()
+
+    total_courses = len(courses)
+    total_enrollments = 0
+    completed_learners = 0
+
+    quiz_scores = []
+    coding_scores = []
+
+    for course in courses:
+
+        # -----------------------------
+        # Enrollments
+        # -----------------------------
+
+        enrollments = Enrollment.query.filter_by(
+            course_id=course.id
+        ).all()
+
+        total_enrollments += len(enrollments)
+
+        for enrollment in enrollments:
+
+            if enrollment.progress >= 100:
+                completed_learners += 1
+
+        # -----------------------------
+        # Quiz Scores
+        # -----------------------------
+
+        quizzes = Quiz.query.filter_by(
+            course_id=course.id
+        ).all()
+
+        for quiz in quizzes:
+
+            attempts = QuizAttempt.query.filter_by(
+                quiz_id=quiz.id
+            ).all()
+
+            for attempt in attempts:
+
+                if attempt.total and attempt.total > 0:
+
+                    score = (
+                        attempt.score /
+                        attempt.total
+                    ) * 100
+
+                    quiz_scores.append(score)
+
+        # -----------------------------
+        # Coding Scores
+        # -----------------------------
+
+        coding_exams = CodingExam.query.filter_by(
+            course_id=course.id
+        ).all()
+
+        for exam in coding_exams:
+
+            submissions = CodingSubmission.query.filter_by(
+                exam_id=exam.id
+            ).all()
+
+            for submission in submissions:
+
+                if exam.total_marks and exam.total_marks > 0:
+
+                    score = (
+                        submission.score /
+                        exam.total_marks
+                    ) * 100
+
+                    coding_scores.append(score)
+
+    # -----------------------------
+    # Completion Rate
+    # -----------------------------
+
+    if total_enrollments > 0:
+        completion_rate = (
+            completed_learners /
+            total_enrollments
+        ) * 100
+    else:
+        completion_rate = 0
+
+    # -----------------------------
+    # Average Quiz Score
+    # -----------------------------
+
+    if quiz_scores:
+        average_quiz_score = (
+            sum(quiz_scores) /
+            len(quiz_scores)
+        )
+    else:
+        average_quiz_score = 0
+
+    # -----------------------------
+    # Average Coding Score
+    # -----------------------------
+
+    if coding_scores:
+        average_coding_score = (
+            sum(coding_scores) /
+            len(coding_scores)
+        )
+    else:
+        average_coding_score = 0
+
+    return jsonify({
+        "trainer_id": trainer.id,
+        "trainer_name": user.name,
+        "total_courses": total_courses,
+        "total_enrollments": total_enrollments,
+        "completed_learners":
+            completed_learners,
+        "completion_rate":
+            round(completion_rate, 2),
+        "average_quiz_score":
+            round(average_quiz_score, 2),
+        "average_coding_score":
+            round(average_coding_score, 2)
+    }), 200
+
+#=============================================================
+# ============================================================
+# ADMIN — COURSE REPORT EXCEL EXPORT
+# ============================================================
+
+@api.get("/admin/export/courses/excel")
+@role_required("admin")
+def export_course_report_excel(user):
+
+    courses = Course.query.all()
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Course Report"
+
+    # Header
+    sheet.append([
+        "Course ID",
+        "Course Title",
+        "Total Enrollments",
+        "Completed Learners",
+        "Completion Rate",
+        "Average Quiz Score",
+        "Average Coding Score"
+    ])
+
+    for course in courses:
+
+        enrollments = Enrollment.query.filter_by(
+            course_id=course.id
+        ).all()
+
+        total_enrollments = len(enrollments)
+
+        completed = 0
+
+        for enrollment in enrollments:
+            if enrollment.progress >= 100:
+                completed += 1
+
+        if total_enrollments > 0:
+            completion_rate = (
+                completed / total_enrollments
+            ) * 100
+        else:
+            completion_rate = 0
+
+        # Quiz scores
+        quizzes = Quiz.query.filter_by(
+            course_id=course.id
+        ).all()
+
+        quiz_scores = []
+
+        for quiz in quizzes:
+
+            attempts = QuizAttempt.query.filter_by(
+                quiz_id=quiz.id
+            ).all()
+
+            for attempt in attempts:
+
+                if attempt.total and attempt.total > 0:
+
+                    score = (
+                        attempt.score /
+                        attempt.total
+                    ) * 100
+
+                    quiz_scores.append(score)
+
+        if quiz_scores:
+            average_quiz_score = (
+                sum(quiz_scores) /
+                len(quiz_scores)
+            )
+        else:
+            average_quiz_score = 0
+
+        # Coding scores
+        coding_exams = CodingExam.query.filter_by(
+            course_id=course.id
+        ).all()
+
+        coding_scores = []
+
+        for exam in coding_exams:
+
+            submissions = CodingSubmission.query.filter_by(
+                exam_id=exam.id
+            ).all()
+
+            for submission in submissions:
+
+                if exam.total_marks and exam.total_marks > 0:
+
+                    score = (
+                        submission.score /
+                        exam.total_marks
+                    ) * 100
+
+                    coding_scores.append(score)
+
+        if coding_scores:
+            average_coding_score = (
+                sum(coding_scores) /
+                len(coding_scores)
+            )
+        else:
+            average_coding_score = 0
+
+        sheet.append([
+            course.id,
+            course.title,
+            total_enrollments,
+            completed,
+            round(completion_rate, 2),
+            round(average_quiz_score, 2),
+            round(average_coding_score, 2)
+        ])
+
+    # Adjust column widths
+    for column in sheet.columns:
+
+        max_length = 0
+        column_letter = column[0].column_letter
+
+        for cell in column:
+
+            if cell.value is not None:
+                max_length = max(
+                    max_length,
+                    len(str(cell.value))
+                )
+
+        sheet.column_dimensions[
+            column_letter
+        ].width = max_length + 2
+
+    output = io.BytesIO()
+
+    workbook.save(output)
+
+    output.seek(0)
+
+    response = Response(
+        output.getvalue(),
+        mimetype=(
+            "application/vnd.openxmlformats-"
+            "officedocument.spreadsheetml.sheet"
+        )
+    )
+
+    response.headers["Content-Disposition"] = (
+        "attachment; filename=course_report.xlsx"
+    )
+
+    return response
 # ============================================================
 # ADMIN — ENROLLMENTS
 # ============================================================
@@ -6491,7 +8319,435 @@ def admin_delete_enrollment(
     })
 
 
+
+#========================
+
 # ============================================================
+# INVOICE PDF
+# ============================================================
+@api.get("/learner/invoices/<int:invoice_id>/download")
+@role_required("learner")
+def download_invoice(user, invoice_id):
+
+    learner = Learner.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not learner:
+        return jsonify({
+            "error": "Learner profile not found"
+        }), 404
+
+    invoice = Invoice.query.filter_by(
+        id=invoice_id,
+        learner_id=learner.id
+    ).first()
+
+    if not invoice:
+        return jsonify({
+            "error": "Invoice not found"
+        }), 404
+
+    course = Course.query.get(invoice.course_id)
+    payment = Payment.query.get(invoice.payment_id)
+
+    total_fee = course.fee if course else invoice.amount
+    amount_paid = invoice.amount
+    pending_amount = max(total_fee - amount_paid, 0)
+
+    # --------------------------------------------------------
+    # CREATE PDF
+    # --------------------------------------------------------
+
+    buffer = io.BytesIO()
+
+    pdf = canvas.Canvas(
+        buffer,
+        pagesize=A4
+    )
+
+    width, height = A4
+
+    # --------------------------------------------------------
+    # HEADER
+    # --------------------------------------------------------
+
+    pdf.setFillColorRGB(0.10, 0.25, 0.45)
+
+    pdf.rect(
+        0,
+        height - 110,
+        width,
+        110,
+        fill=1,
+        stroke=0
+    )
+
+    pdf.setFillColorRGB(1, 1, 1)
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        24
+    )
+
+    pdf.drawString(
+        50,
+        height - 55,
+        "DEVSPRINT"
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        10
+    )
+
+    pdf.drawString(
+        50,
+        height - 75,
+        "Learning Management System"
+    )
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        22
+    )
+
+    pdf.drawRightString(
+        width - 50,
+        height - 55,
+        "INVOICE"
+    )
+
+    # --------------------------------------------------------
+    # INVOICE INFORMATION
+    # --------------------------------------------------------
+
+    y = height - 145
+
+    pdf.setFillColorRGB(0.15, 0.15, 0.15)
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        10
+    )
+
+    pdf.drawString(
+        50,
+        y,
+        "INVOICE DETAILS"
+    )
+
+    y -= 22
+
+    pdf.setFont(
+        "Helvetica",
+        10
+    )
+
+    pdf.drawString(
+        50,
+        y,
+        f"Invoice Number: {invoice.invoice_number}"
+    )
+
+    pdf.drawRightString(
+        width - 50,
+        y,
+        f"Invoice Date: {invoice.invoice_date.strftime('%d-%m-%Y')}"
+    )
+
+    # --------------------------------------------------------
+    # BILL TO
+    # --------------------------------------------------------
+
+    y -= 45
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        11
+    )
+
+    pdf.drawString(
+        50,
+        y,
+        "BILL TO"
+    )
+
+    y -= 22
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        11
+    )
+
+    pdf.drawString(
+        50,
+        y,
+        learner.user.name
+    )
+
+    y -= 18
+
+    pdf.setFont(
+        "Helvetica",
+        10
+    )
+
+    pdf.drawString(
+        50,
+        y,
+        f"Email: {learner.user.email}"
+    )
+
+    y -= 18
+
+    pdf.drawString(
+        50,
+        y,
+        f"Mobile: {learner.user.mobile}"
+    )
+
+    # --------------------------------------------------------
+    # COURSE DETAILS TABLE
+    # --------------------------------------------------------
+
+    y -= 45
+
+    pdf.setFillColorRGB(0.10, 0.25, 0.45)
+
+    pdf.rect(
+        50,
+        y - 25,
+        width - 100,
+        25,
+        fill=1,
+        stroke=0
+    )
+
+    pdf.setFillColorRGB(1, 1, 1)
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        10
+    )
+
+    pdf.drawString(
+        60,
+        y - 17,
+        "COURSE"
+    )
+
+    pdf.drawRightString(
+        width - 60,
+        y - 17,
+        "AMOUNT"
+    )
+
+    y -= 45
+
+    pdf.setFillColorRGB(0.15, 0.15, 0.15)
+
+    pdf.setFont(
+        "Helvetica",
+        10
+    )
+
+    pdf.drawString(
+        60,
+        y,
+        course.title if course else "N/A"
+    )
+
+    pdf.drawRightString(
+        width - 60,
+        y,
+        f"Rs. {amount_paid:.2f}"
+    )
+
+    y -= 18
+
+    pdf.setFont(
+        "Helvetica",
+        9
+    )
+
+    pdf.drawString(
+        60,
+        y,
+        f"Course ID: {invoice.course_id}"
+    )
+
+    # --------------------------------------------------------
+    # PAYMENT SUMMARY
+    # --------------------------------------------------------
+
+    y -= 50
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        12
+    )
+
+    pdf.drawString(
+        50,
+        y,
+        "PAYMENT SUMMARY"
+    )
+
+    y -= 25
+
+    pdf.setFont(
+        "Helvetica",
+        10
+    )
+
+    pdf.drawString(
+        50,
+        y,
+        "Total Course Fee"
+    )
+
+    pdf.drawRightString(
+        width - 60,
+        y,
+        f"Rs. {total_fee:.2f}"
+    )
+
+    y -= 22
+
+    pdf.drawString(
+        50,
+        y,
+        "Current Payment"
+    )
+
+    pdf.drawRightString(
+        width - 60,
+        y,
+        f"Rs. {amount_paid:.2f}"
+    )
+
+    y -= 22
+
+    pdf.drawString(
+        50,
+        y,
+        "Balance Due"
+    )
+
+    pdf.drawRightString(
+        width - 60,
+        y,
+        f"Rs. {pending_amount:.2f}"
+    )
+
+    # --------------------------------------------------------
+    # PAYMENT STATUS
+    # --------------------------------------------------------
+
+    y -= 45
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        10
+    )
+
+    pdf.drawString(
+        50,
+        y,
+        "Payment Method:"
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        10
+    )
+
+    pdf.drawString(
+        145,
+        y,
+        payment.payment_method if payment else "N/A"
+    )
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        10
+    )
+
+    pdf.drawString(
+        50,
+        y - 22,
+        "Payment Status:"
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        10
+    )
+
+    pdf.drawString(
+        145,
+        y - 22,
+        invoice.status
+    )
+
+    # --------------------------------------------------------
+    # FOOTER
+    # --------------------------------------------------------
+
+    pdf.setFillColorRGB(
+        0.10,
+        0.25,
+        0.45
+    )
+
+    pdf.rect(
+        0,
+        0,
+        width,
+        55,
+        fill=1,
+        stroke=0
+    )
+
+    pdf.setFillColorRGB(
+        1,
+        1,
+        1
+    )
+
+    pdf.setFont(
+        "Helvetica-Bold",
+        10
+    )
+
+    pdf.drawCentredString(
+        width / 2,
+        32,
+        "Thank you for learning with DevSprint LMS!"
+    )
+
+    pdf.setFont(
+        "Helvetica",
+        8
+    )
+
+    pdf.drawCentredString(
+        width / 2,
+        17,
+        "This is a computer-generated invoice."
+    )
+
+    pdf.save()
+
+    buffer.seek(0)
+
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name=f"{invoice.invoice_number}.pdf",
+        mimetype="application/pdf"
+    )# ============================================================
 # ADMIN — CERTIFICATES
 # ============================================================
 

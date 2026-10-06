@@ -233,6 +233,11 @@ class Course(db.Model):
         db.Text,
         default=""
     )
+    fee = db.Column(
+    db.Float,
+    nullable=False,
+    default=0
+    )
 
     published = db.Column(
         db.Boolean,
@@ -436,7 +441,24 @@ class Enrollment(db.Model):
         db.DateTime,
         default=datetime.utcnow
     )
+    total_fee = db.Column(
+        db.Float,
+        nullable=False,
+        default=0
+    )
 
+    amount_paid = db.Column(
+        db.Float,
+        nullable=False,
+        default=0
+    )
+
+    payment_status = db.Column(
+        db.String(20),
+        nullable=False,
+        default="pending"
+    )
+    
     __table_args__ = (
         db.UniqueConstraint(
             "learner_id",
@@ -910,6 +932,17 @@ class Payment(db.Model):
         db.String(20),
         default="pending"
     )
+    course_id = db.Column(
+    db.String(80),
+    db.ForeignKey("course.id"),
+    nullable=True
+    )
+
+    enrollment_id = db.Column(
+    db.Integer,
+    db.ForeignKey("enrollment.id"),
+    nullable=True
+    )
 
 
 # =========================================================
@@ -949,6 +982,17 @@ class Invoice(db.Model):
     status = db.Column(
         db.String(20),
         default="unpaid"
+    )
+    payment_id = db.Column(
+    db.Integer,
+    db.ForeignKey("payment.id"),
+    nullable=True
+    )
+
+    course_id = db.Column(
+    db.String(80),
+    db.ForeignKey("course.id"),
+    nullable=True
     )
 
 
