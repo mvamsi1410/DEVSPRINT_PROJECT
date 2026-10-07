@@ -6,10 +6,12 @@ from flask import (
     send_from_directory,
     current_app,
 )
+from sqlalchemy import text
 import io
 import csv
 import qrcode
 from openpyxl import Workbook
+from .code_runner.runner import run_code
 
 from flask import send_file
 from reportlab.pdfgen import canvas
@@ -22,6 +24,7 @@ import uuid
 from datetime import datetime, timedelta, date
 
 from werkzeug.utils import secure_filename
+
 
 from . import db
 
@@ -43,6 +46,17 @@ from .models import (
     QuizAnswer,
     CodingExam,
     CodingQuestion,
+    Discussion,
+    DiscussionReply,
+    DiscussionLike,
+    QuestionBank,
+    MixedExam,
+    MixedExamSection,
+    MixedExamQuestion,
+    ExamInvite,
+    MixedExamAttempt,
+    MixedExamAnswer,
+    CalendarEvent,
     CodingTestCase,
     CodingSubmission,
     Certificate,
@@ -54,6 +68,7 @@ from .models import (
     Invoice,
     LessonProgress,
     LessonResource,
+    Notification,
     Wishlist,
     Discussion,
 )
@@ -66,6 +81,27 @@ from .auth import (
     token_required,
     role_required,
 )
+def create_notification(
+    user_id,
+    title,
+    message,
+    notification_type,
+    related_id=None,
+    related_type=None
+):
+    notification = Notification(
+        user_id=user_id,
+        title=title,
+        message=message,
+        notification_type=notification_type,
+        related_id=related_id,
+        related_type=related_type,
+        is_read=False
+    )
+
+    db.session.add(notification)
+
+    return notification
 
 
 api = Blueprint("api", __name__)
@@ -1966,7 +2002,6 @@ def trainer_update_module(
 # =========================================================
 # TRAINER - CREATE LESSON
 # =========================================================
-
 @api.post(
     "/trainer/modules/<int:module_id>/lessons"
 )
@@ -1981,8 +2016,7 @@ def trainer_create_lesson(
 
     if not trainer:
         return jsonify({
-            "error":
-                "Trainer profile not found"
+            "error": "Trainer profile not found"
         }), 404
 
     module = Module.query.get_or_404(
@@ -1995,8 +2029,7 @@ def trainer_create_lesson(
 
     if course.trainer_id != trainer.id:
         return jsonify({
-            "error":
-                "You do not own this module"
+            "error": "You do not own this module"
         }), 403
 
     data = (
@@ -2022,8 +2055,7 @@ def trainer_create_lesson(
 
     if not lesson_id:
         return jsonify({
-            "error":
-                "Lesson ID is required"
+            "error": "Lesson ID is required"
         }), 400
 
     # -----------------------------------------------------
@@ -2039,8 +2071,7 @@ def trainer_create_lesson(
 
     if not title:
         return jsonify({
-            "error":
-                "Lesson title is required"
+            "error": "Lesson title is required"
         }), 400
 
     # -----------------------------------------------------
@@ -2049,8 +2080,7 @@ def trainer_create_lesson(
 
     if Lesson.query.get(lesson_id):
         return jsonify({
-            "error":
-                "Lesson ID already exists"
+            "error": "Lesson ID already exists"
         }), 409
 
     # -----------------------------------------------------
@@ -2111,11 +2141,38 @@ def trainer_create_lesson(
     )
 
     db.session.add(lesson)
+
+    # -----------------------------------------------------
+    # NOTIFY ENROLLED LEARNERS
+    # -----------------------------------------------------
+
+    enrollments = Enrollment.query.filter_by(
+        course_id=course.id
+    ).all()
+
+    for enrollment in enrollments:
+
+        learner = Learner.query.get(
+            enrollment.learner_id
+        )
+
+        if learner:
+            create_notification(
+                user_id=learner.user_id,
+                title="New Lesson Published",
+                message=(
+                    f"A new lesson '{lesson.title}' "
+                    f"has been published in {course.title}."
+                ),
+                notification_type="LESSON_PUBLISHED",
+                related_id=lesson.id,
+                related_type="LESSON"
+            )
+
     db.session.commit()
 
     return jsonify({
-        "message":
-            "Lesson created successfully",
+        "message": "Lesson created successfully",
 
         "lesson": {
             "id": lesson.id,
@@ -2129,8 +2186,6 @@ def trainer_create_lesson(
             "order_no": lesson.order_no,
         },
     }), 201
-
-
 # =========================================================
 # LEARNER - ENROLL
 # =========================================================
@@ -2581,7 +2636,6 @@ def get_lesson_progress(user, lesson_id):
         )
     })
 
-
 @api.post("/learner/lessons/<string:lesson_id>/progress")
 @role_required("learner")
 def update_lesson_progress(user, lesson_id):
@@ -2623,13 +2677,11 @@ def update_lesson_progress(user, lesson_id):
         lesson.duration
     )
 
-    # Never allow learning time greater than lesson duration
     validated_learning_time = min(
         requested_learning_time,
         lesson_duration_seconds
     )
 
-    # Minimum required = 75% of lesson duration
     lesson_minimum_time = int(
         lesson_duration_seconds * 0.75
     )
@@ -2658,13 +2710,11 @@ def update_lesson_progress(user, lesson_id):
         db.session.add(progress)
 
     else:
-        # Never reduce previously validated learning time
         progress.learning_time_seconds = max(
             progress.learning_time_seconds or 0,
             validated_learning_time
         )
 
-        # Recalculate completion status
         progress.completed = (
             progress.learning_time_seconds
             >= lesson_minimum_time
@@ -2863,6 +2913,22 @@ def update_lesson_progress(user, lesson_id):
 
                     db.session.add(certificate)
 
+                    # ----------------------------------------
+                    # Certificate notification
+                    # ----------------------------------------
+
+                    create_notification(
+                        user_id=learner.user_id,
+                        title="Certificate Issued",
+                        message=(
+                            f"Congratulations! Your certificate "
+                            f"for {course.title} has been issued."
+                        ),
+                        notification_type="CERTIFICATE_ISSUED",
+                        related_id=certificate.id,
+                        related_type="CERTIFICATE"
+                    )
+
             db.session.commit()
 
     return jsonify({
@@ -2873,7 +2939,6 @@ def update_lesson_progress(user, lesson_id):
             progress.learning_time_seconds
         )
     }), 200
-
 
 @api.get("/learner/courses/<string:course_id>/progress")
 @role_required("learner")
@@ -3719,11 +3784,6 @@ def trainer_learner_progress(
             for lesson in lessons
         ]
     })
-
-#=============================================================
-# # ============================================================
-# TRAINER — ALL STUDENTS
-# ============================================================
 # ============================================================
 # TRAINER — ALL STUDENTS
 # ============================================================
@@ -5763,7 +5823,6 @@ def learner_exam_detail(
 # ============================================================
 # LEARNER — SUBMIT EXAM
 # ============================================================
-
 @api.post("/learner/exams/<int:exam_id>/submit")
 @role_required("learner")
 def learner_submit_exam(
@@ -5779,9 +5838,7 @@ def learner_submit_exam(
             "error": "Learner profile not found"
         }), 404
 
-    quiz = Quiz.query.get(
-        exam_id
-    )
+    quiz = Quiz.query.get(exam_id)
 
     if not quiz:
         return jsonify({
@@ -5814,20 +5871,13 @@ def learner_submit_exam(
     answers = data.get("answers", {})
 
     # --------------------------------------------------------
-    # Accept a few frontend formats safely.
+    # Validate submitted answers
     # --------------------------------------------------------
 
     if not isinstance(answers, dict):
         return jsonify({
             "error": "answers must be an object"
         }), 400
-
-    # --------------------------------------------------------
-    # Normalize all submitted answers FIRST.
-    #
-    # This fixes the previous bug where only the last answer
-    # was processed.
-    # --------------------------------------------------------
 
     submitted_answers = {}
 
@@ -5893,43 +5943,43 @@ def learner_submit_exam(
         })
 
     # --------------------------------------------------------
-    # Save attempt
+    # Save exam attempt
     # --------------------------------------------------------
 
     attempt = QuizAttempt(
-    quiz_id=quiz.id,
-    learner_id=learner.id,
-    score=score,
-    total=total
+        quiz_id=quiz.id,
+        learner_id=learner.id,
+        score=score,
+        total=total
     )
 
     db.session.add(attempt)
 
     db.session.flush()
 
-# --------------------------------------------------------
-# Store every submitted answer
-# --------------------------------------------------------
+    # --------------------------------------------------------
+    # Store every submitted answer
+    # --------------------------------------------------------
 
     for question in questions:
 
         selected_answer = submitted_answers.get(
-        str(question.id)
+            str(question.id)
         )
 
         correct_answer = str(
-        question.correct_answer or ""
+            question.correct_answer or ""
         ).strip().upper()
 
         is_correct = (
-        selected_answer is not None
-        and selected_answer == correct_answer
+            selected_answer is not None
+            and selected_answer == correct_answer
         )
 
         marks_awarded = (
-        int(question.marks or 0)
-        if is_correct
-        else 0
+            int(question.marks or 0)
+            if is_correct
+            else 0
         )
 
         answer_record = QuizAnswer(
@@ -5942,39 +5992,35 @@ def learner_submit_exam(
 
         db.session.add(answer_record)
 
+    # --------------------------------------------------------
+    # Assessment graded notification
+    # --------------------------------------------------------
+
+    create_notification(
+        user_id=learner.user_id,
+        title="Assessment Graded",
+        message=(
+            f"Your assessment '{quiz.title}' has been graded. "
+            f"You scored {score}/{total}."
+        ),
+        notification_type="ASSESSMENT_GRADED",
+        related_id=quiz.id,
+        related_type="QUIZ"
+    )
+
     db.session.commit()
-    answer_record = QuizAnswer(
 
-            attempt_id=attempt.id,
-
-            question_id=question.id,
-
-            selected_answer=selected_answer,
-
-            is_correct=is_correct,
-
-            marks_awarded=marks_awarded
-
-        )
-
-    db.session.add(answer_record)
-
-    db.session.commit()
+    # --------------------------------------------------------
+    # Calculate percentage
+    # --------------------------------------------------------
 
     percentage = (
-
         round(
-
             (score / total) * 100,
-
             2
-
         )
-
         if total > 0
-
         else 0
-
     )
 
     return jsonify({
@@ -6002,7 +6048,6 @@ def learner_submit_exam(
         }
 
     }), 200
-
 
 # ============================================================
 # LEARNER — QUIZ ATTEMPTS
@@ -9475,60 +9520,113 @@ def learner_get_attendance(user):
 # ============================================================
 # DISCUSSIONS
 # ============================================================
-
 @api.get("/courses/<string:course_id>/discussions")
 @token_required
-def get_course_discussions(
-    user,
-    course_id
-):
-    course = Course.query.get(
-        course_id
-    )
+def get_course_discussions(user, course_id):
+
+    course = Course.query.get(course_id)
 
     if not course:
         return jsonify({
             "error": "Course not found"
         }), 404
 
-    discussions = Discussion.query.filter_by(
+    # Get modules belonging to this course
+    modules = Module.query.filter_by(
         course_id=course_id
-    ).order_by(
-        Discussion.id.desc()
     ).all()
+
+    module_ids = [
+        module.id
+        for module in modules
+    ]
+
+    # Get lessons belonging to those modules
+    lessons = []
+
+    if module_ids:
+        lessons = Lesson.query.filter(
+            Lesson.module_id.in_(module_ids)
+        ).all()
+
+    lesson_ids = [
+        lesson.id
+        for lesson in lessons
+    ]
+
+    # Get discussions belonging to those lessons
+    discussions = []
+
+    if lesson_ids:
+        discussions = Discussion.query.filter(
+            Discussion.lesson_id.in_(lesson_ids)
+        ).order_by(
+            Discussion.id.desc()
+        ).all()
 
     result = []
 
     for discussion in discussions:
+
         discussion_user = User.query.get(
             discussion.user_id
         )
 
+        replies = DiscussionReply.query.filter_by(
+            discussion_id=discussion.id
+        ).order_by(
+            DiscussionReply.id.asc()
+        ).all()
+
+        reply_data = []
+
+        for reply in replies:
+
+            reply_user = User.query.get(
+                reply.user_id
+            )
+
+            reply_likes = DiscussionLike.query.filter_by(
+                reply_id=reply.id
+            ).count()
+
+            reply_data.append({
+                "id": reply.id,
+                "message": reply.message,
+                "user_id": reply.user_id,
+                "user_name": (
+                    reply_user.name
+                    if reply_user
+                    else None
+                ),
+                "is_accepted": reply.is_accepted,
+                "like_count": reply_likes,
+                "created_at": (
+                    reply.created_at.isoformat()
+                    if reply.created_at
+                    else None
+                )
+            })
+
+        discussion_likes = DiscussionLike.query.filter_by(
+            discussion_id=discussion.id
+        ).count()
+
         result.append({
             "id": discussion.id,
-            "course_id": discussion.course_id,
+            "lesson_id": discussion.lesson_id,
             "user_id": discussion.user_id,
             "user_name": (
                 discussion_user.name
                 if discussion_user
                 else None
             ),
-            "message": getattr(
-                discussion,
-                "message",
-                getattr(
-                    discussion,
-                    "content",
-                    ""
-                )
-            ),
+            "message": discussion.message,
+            "like_count": discussion_likes,
+            "replies": reply_data,
             "created_at": (
                 discussion.created_at.isoformat()
-                if getattr(
-                    discussion,
-                    "created_at",
-                    None
-                )
+                if discussion.created_at
                 else None
             )
         })
@@ -9536,17 +9634,11 @@ def get_course_discussions(
     return jsonify({
         "discussions": result
     })
-
-
 @api.post("/courses/<string:course_id>/discussions")
 @token_required
-def create_course_discussion(
-    user,
-    course_id
-):
-    course = Course.query.get(
-        course_id
-    )
+def create_course_discussion(user, course_id):
+
+    course = Course.query.get(course_id)
 
     if not course:
         return jsonify({
@@ -9555,70 +9647,193 @@ def create_course_discussion(
 
     data = request.get_json(silent=True) or {}
 
-    message = data.get(
-        "message"
-    )
+    message = data.get("message")
 
     if message is None:
-        message = data.get(
-            "content",
-            ""
-        )
+        message = data.get("content", "")
 
-    message = str(
-        message
-    ).strip()
+    message = str(message).strip()
 
     if not message:
         return jsonify({
             "error": "Message is required"
         }), 400
 
-    discussion_data = {
-        "course_id": course_id,
-        "user_id": user.id
-    }
+    # Find a module belonging to this course
+    module = Module.query.filter_by(
+        course_id=course_id
+    ).first()
 
-    # --------------------------------------------------------
-    # Support whichever text field exists in the model.
-    # --------------------------------------------------------
-
-    if hasattr(Discussion, "message"):
-        discussion_data["message"] = message
-    elif hasattr(Discussion, "content"):
-        discussion_data["content"] = message
-    else:
+    if not module:
         return jsonify({
-            "error": "Discussion model does not contain a message field"
-        }), 500
+            "error": "No module found for this course"
+        }), 404
 
+    # Find a lesson belonging to that module
+    lesson = Lesson.query.filter_by(
+        module_id=module.id
+    ).first()
+
+    if not lesson:
+        return jsonify({
+            "error": "No lesson found for this course"
+        }), 404
+
+    # Discussion table uses lesson_id
     discussion = Discussion(
-        **discussion_data
+        lesson_id=lesson.id,
+        user_id=user.id,
+        message=message
     )
 
     db.session.add(discussion)
     db.session.commit()
 
     return jsonify({
-        "message": "Discussion posted successfully",
+        "message": "Discussion created successfully",
         "discussion": {
             "id": discussion.id,
-            "course_id": discussion.course_id,
+            "lesson_id": discussion.lesson_id,
             "user_id": discussion.user_id,
             "user_name": user.name,
-            "message": message,
+            "message": discussion.message,
             "created_at": (
                 discussion.created_at.isoformat()
-                if getattr(
-                    discussion,
-                    "created_at",
-                    None
-                )
+                if discussion.created_at
                 else None
             )
         }
     }), 201
 
+@api.post("/discussions/<int:discussion_id>/replies")
+@token_required
+def create_discussion_reply(user, discussion_id):
+
+    discussion = Discussion.query.get(discussion_id)
+
+    if not discussion:
+        return jsonify({
+            "error": "Discussion not found"
+        }), 404
+
+    message = (
+        request.get_json(silent=True) or {}
+    ).get("message", "").strip()
+
+    if not message:
+        return jsonify({
+            "error": "Reply message is required"
+        }), 400
+
+    reply = DiscussionReply(
+        discussion_id=discussion.id,
+        user_id=user.id,
+        message=message
+    )
+
+    db.session.add(reply)
+    db.session.commit()
+
+    return jsonify({
+        "message": "Reply posted",
+        "reply": {
+            "id": reply.id,
+            "discussion_id": reply.discussion_id,
+            "message": reply.message,
+            "user": user.name,
+            "is_accepted": reply.is_accepted,
+            "createdAt": reply.created_at.isoformat()
+        }
+    }), 201
+
+@api.post("/discussions/<int:discussion_id>/like")
+@token_required
+def like_discussion(user, discussion_id):
+
+    discussion = Discussion.query.get(discussion_id)
+
+    if not discussion:
+        return jsonify({
+            "error": "Discussion not found"
+        }), 404
+
+    existing_like = DiscussionLike.query.filter_by(
+        user_id=user.id,
+        discussion_id=discussion_id
+    ).first()
+
+    if existing_like:
+        db.session.delete(existing_like)
+        action = "unliked"
+    else:
+        like = DiscussionLike(
+            user_id=user.id,
+            discussion_id=discussion_id
+        )
+        db.session.add(like)
+        action = "liked"
+
+    db.session.commit()
+
+    like_count = DiscussionLike.query.filter_by(
+        discussion_id=discussion_id
+    ).count()
+
+    return jsonify({
+        "message": f"Discussion {action}",
+        "liked": action == "liked",
+        "like_count": like_count
+    }), 200
+
+@api.post("/discussions/<int:discussion_id>/replies/<int:reply_id>/accept")
+@token_required
+def accept_discussion_reply(user, discussion_id, reply_id):
+
+    # Only trainers can accept answers
+    if str(user.role).upper() != "TRAINER":
+        return jsonify({
+            "error": "Only trainers can accept answers"
+        }), 403
+
+    discussion = Discussion.query.get(discussion_id)
+
+    if not discussion:
+        return jsonify({
+            "error": "Discussion not found"
+        }), 404
+
+    reply = DiscussionReply.query.get(reply_id)
+
+    if not reply or reply.discussion_id != discussion_id:
+        return jsonify({
+            "error": "Reply not found"
+        }), 404
+
+    # Remove accepted status from other replies
+    DiscussionReply.query.filter_by(
+        discussion_id=discussion_id
+    ).update({
+        "is_accepted": False
+    })
+
+    # Mark this reply as accepted
+    reply.is_accepted = True
+
+    db.session.commit()
+
+    return jsonify({
+        "message": "Answer accepted",
+        "reply": {
+            "id": reply.id,
+            "discussion_id": reply.discussion_id,
+            "message": reply.message,
+            "user": User.query.get(reply.user_id).name
+            if User.query.get(reply.user_id)
+            else None,
+            "is_accepted": reply.is_accepted,
+            "createdAt": reply.created_at.isoformat()
+        }
+    }), 200
 
 # ============================================================
 # END OF PART 6
@@ -10769,8 +10984,909 @@ def trainer_delete_coding_question(user, question_id):
     return jsonify({
         "message": "Coding question deleted successfully"
     })
+#=============================================================
+# TRAINER — QUESTION BANK
 
-# ============================================================
+@api.post("/trainer/question-bank")
+@role_required("trainer")
+def add_question_to_bank(user):
+    data = request.get_json() or {}
+
+    question_type = data.get("question_type")
+    question_id = data.get("question_id")
+
+    if question_type not in ["MCQ", "CODING"]:
+        return {"error": "question_type must be MCQ or CODING"}, 400
+
+    if not question_id:
+        return {"error": "question_id is required"}, 400
+
+    trainer = Trainer.query.filter_by(user_id=user.id).first()
+
+    if not trainer:
+        return {"error": "Trainer profile not found"}, 404
+
+    if question_type == "MCQ":
+        question = Question.query.get(question_id)
+
+        if not question:
+            return {"error": "MCQ question not found"}, 404
+
+        existing = QuestionBank.query.filter_by(
+            question_type="MCQ",
+            mcq_question_id=question.id,
+            trainer_id=trainer.id
+        ).first()
+
+        if existing:
+            return {"error": "Question already exists in question bank"}, 409
+
+        bank_question = QuestionBank(
+            question_type="MCQ",
+            mcq_question_id=question.id,
+            trainer_id=trainer.id
+        )
+
+    else:
+        question = CodingQuestion.query.get(question_id)
+
+        if not question:
+            return {"error": "Coding question not found"}, 404
+
+        existing = QuestionBank.query.filter_by(
+            question_type="CODING",
+            coding_question_id=question.id,
+            trainer_id=trainer.id
+        ).first()
+
+        if existing:
+            return {"error": "Question already exists in question bank"}, 409
+
+        bank_question = QuestionBank(
+            question_type="CODING",
+            coding_question_id=question.id,
+            trainer_id=trainer.id
+        )
+
+    db.session.add(bank_question)
+    db.session.commit()
+
+    return {
+        "message": "Question added to question bank successfully",
+        "id": bank_question.id,
+        "question_type": bank_question.question_type
+    }, 201
+
+#=============================================================
+@api.get("/trainer/question-bank")
+@role_required("trainer")
+def get_question_bank(user):
+    trainer = Trainer.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not trainer:
+        return {"error": "Trainer profile not found"}, 404
+
+    questions = QuestionBank.query.filter_by(
+        trainer_id=trainer.id
+    ).order_by(
+        QuestionBank.id.desc()
+    ).all()
+
+    result = []
+
+    for item in questions:
+        data = {
+            "id": item.id,
+            "question_type": item.question_type
+        }
+
+        if item.question_type == "MCQ":
+            question = Question.query.get(item.mcq_question_id)
+
+            if question:
+                data["question_id"] = question.id
+                data["question_text"] = question.question_text
+                data["marks"] = question.marks
+
+        elif item.question_type == "CODING":
+            question = CodingQuestion.query.get(item.coding_question_id)
+
+            if question:
+                data["question_id"] = question.id
+                data["title"] = question.title
+                data["difficulty"] = question.difficulty
+                data["points"] = question.points
+
+        result.append(data)
+
+    return {
+        "questions": result,
+        "total": len(result)
+    }, 200
+#===========================================================
+@api.delete("/trainer/question-bank/<int:bank_id>")
+@role_required("trainer")
+def delete_question_from_bank(user, bank_id):
+    trainer = Trainer.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not trainer:
+        return {"error": "Trainer profile not found"}, 404
+
+    bank_question = QuestionBank.query.filter_by(
+        id=bank_id,
+        trainer_id=trainer.id
+    ).first()
+
+    if not bank_question:
+        return {"error": "Question not found in your question bank"}, 404
+
+    db.session.delete(bank_question)
+    db.session.commit()
+
+    return {
+        "message": "Question removed from question bank successfully"
+    }, 200
+
+#============================================================
+# TRAINER — MIXED EXAMS
+
+@api.post("/trainer/mixed-exams")
+@role_required("trainer")
+def create_mixed_exam(user):
+    data = request.get_json() or {}
+
+    title = data.get("title")
+    description = data.get("description", "")
+    course_id = data.get("course_id")
+    duration = data.get("duration", 60)
+
+    if not title:
+        return {"error": "title is required"}, 400
+
+    trainer = Trainer.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not trainer:
+        return {"error": "Trainer profile not found"}, 404
+
+    exam = MixedExam(
+        title=title,
+        description=description,
+        course_id=course_id,
+        trainer_id=trainer.id,
+        duration=duration,
+        total_marks=0,
+        status="draft"
+    )
+
+    db.session.add(exam)
+    db.session.commit()
+
+    return {
+        "message": "Mixed exam created successfully",
+        "id": exam.id,
+        "title": exam.title,
+        "status": exam.status
+    }, 201
+
+@api.post("/trainer/mixed-exams/<int:exam_id>/sections")
+@role_required("trainer")
+def create_mixed_exam_section(user, exam_id):
+    data = request.get_json() or {}
+
+    title = data.get("title")
+    section_type = data.get("section_type")
+
+    if not title:
+        return {"error": "title is required"}, 400
+
+    if section_type not in ["MCQ", "CODING"]:
+        return {"error": "section_type must be MCQ or CODING"}, 400
+
+    trainer = Trainer.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not trainer:
+        return {"error": "Trainer profile not found"}, 404
+
+    exam = MixedExam.query.filter_by(
+        id=exam_id,
+        trainer_id=trainer.id
+    ).first()
+
+    if not exam:
+        return {"error": "Mixed exam not found"}, 404
+
+    section = MixedExamSection(
+        exam_id=exam.id,
+        title=title,
+        section_type=section_type,
+        order_index=data.get("order_index", 0),
+        total_marks=data.get("total_marks", 0)
+    )
+
+    db.session.add(section)
+    db.session.commit()
+
+    return {
+        "message": "Mixed exam section created successfully",
+        "id": section.id,
+        "exam_id": exam.id,
+        "title": section.title,
+        "section_type": section.section_type
+    }, 201
+@api.post("/trainer/mixed-exams/<int:exam_id>/sections/<int:section_id>/questions")
+@role_required("trainer")
+def add_mixed_exam_question(user, exam_id, section_id):
+    data = request.get_json() or {}
+
+    question_type = data.get("question_type")
+    question_id = data.get("question_id")
+
+    if question_type not in ["MCQ", "CODING"]:
+        return {"error": "question_type must be MCQ or CODING"}, 400
+
+    if not question_id:
+        return {"error": "question_id is required"}, 400
+
+    trainer = Trainer.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not trainer:
+        return {"error": "Trainer profile not found"}, 404
+
+    exam = MixedExam.query.filter_by(
+        id=exam_id,
+        trainer_id=trainer.id
+    ).first()
+
+    if not exam:
+        return {"error": "Mixed exam not found"}, 404
+
+    section = MixedExamSection.query.filter_by(
+        id=section_id,
+        exam_id=exam.id
+    ).first()
+
+    if not section:
+        return {"error": "Section not found"}, 404
+
+    if section.section_type != question_type:
+        return {
+            "error": "Question type does not match section type"
+        }, 400
+
+    if question_type == "MCQ":
+        question = Question.query.get(question_id)
+
+        if not question:
+            return {"error": "MCQ question not found"}, 404
+
+        mixed_question = MixedExamQuestion(
+            section_id=section.id,
+            question_type="MCQ",
+            mcq_question_id=question.id,
+            marks=question.marks
+        )
+
+    else:
+        result = db.session.execute(
+            text("""
+                SELECT id, marks
+                FROM coding_question
+                WHERE id = :question_id
+            """),
+            {"question_id": question_id}
+        ).mappings().first()
+
+        if not result:
+            return {"error": "Coding question not found"}, 404
+
+        mixed_question = MixedExamQuestion(
+            section_id=section.id,
+            question_type="CODING",
+            coding_question_id=result["id"],
+            marks=result["marks"] or 1
+        )
+
+    db.session.add(mixed_question)
+    db.session.commit()
+
+    return {
+        "message": "Question added to mixed exam successfully",
+        "id": mixed_question.id,
+        "section_id": section.id,
+        "question_type": mixed_question.question_type,
+        "question_id": question_id
+    }, 201
+#==============================================================
+@api.get("/trainer/mixed-exams/<int:exam_id>")
+@role_required("trainer")
+def get_mixed_exam(user, exam_id):
+    trainer = Trainer.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not trainer:
+        return {"error": "Trainer profile not found"}, 404
+
+    exam = MixedExam.query.filter_by(
+        id=exam_id,
+        trainer_id=trainer.id
+    ).first()
+
+    if not exam:
+        return {"error": "Mixed exam not found"}, 404
+
+    sections = MixedExamSection.query.filter_by(
+        exam_id=exam.id
+    ).order_by(
+        MixedExamSection.order_index.asc()
+    ).all()
+
+    section_result = []
+
+    for section in sections:
+        questions = MixedExamQuestion.query.filter_by(
+            section_id=section.id
+        ).order_by(
+            MixedExamQuestion.order_index.asc()
+        ).all()
+
+        question_result = []
+
+        for item in questions:
+            data = {
+                "id": item.id,
+                "question_type": item.question_type,
+                "question_id": (
+                    item.mcq_question_id
+                    if item.question_type == "MCQ"
+                    else item.coding_question_id
+                ),
+                "marks": item.marks
+            }
+
+            if item.question_type == "MCQ":
+                question = Question.query.get(item.mcq_question_id)
+
+                if question:
+                    data["question_text"] = question.question_text
+
+            else:
+                result = db.session.execute(
+                    text("""
+                        SELECT id, question_text, marks
+                        FROM coding_question
+                        WHERE id = :question_id
+                    """),
+                    {"question_id": item.coding_question_id}
+                ).mappings().first()
+
+                if result:
+                    data["question_text"] = result["question_text"]
+
+            question_result.append(data)
+
+        section_result.append({
+            "id": section.id,
+            "title": section.title,
+            "section_type": section.section_type,
+            "order_index": section.order_index,
+            "total_marks": section.total_marks,
+            "questions": question_result
+        })
+
+    return {
+        "id": exam.id,
+        "title": exam.title,
+        "description": exam.description,
+        "course_id": exam.course_id,
+        "duration": exam.duration,
+        "total_marks": exam.total_marks,
+        "status": exam.status,
+        "sections": section_result
+    }, 200
+
+#==============================================================
+# TRAINER — CREATE MIXED EXAM INVITE
+
+@api.post("/trainer/mixed-exams/<int:exam_id>/invite")
+@role_required("trainer")
+def create_mixed_exam_invite(user, exam_id):
+    data = request.get_json() or {}
+
+    trainer = Trainer.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not trainer:
+        return {"error": "Trainer profile not found"}, 404
+
+    exam = MixedExam.query.filter_by(
+        id=exam_id,
+        trainer_id=trainer.id
+    ).first()
+
+    if not exam:
+        return {"error": "Mixed exam not found"}, 404
+
+    expires_in_hours = data.get("expires_in_hours", 24)
+    max_attempts = data.get("max_attempts", 1)
+
+    invite_code = secrets.token_urlsafe(8)
+
+    while ExamInvite.query.filter_by(
+        invite_code=invite_code
+    ).first():
+        invite_code = secrets.token_urlsafe(8)
+
+    invite = ExamInvite(
+        exam_id=exam.id,
+        invite_code=invite_code,
+        expires_at=datetime.utcnow() + timedelta(
+            hours=expires_in_hours
+        ),
+        max_attempts=max_attempts,
+        status="active"
+    )
+
+    db.session.add(invite)
+    db.session.commit()
+
+    return {
+        "message": "Exam invite created successfully",
+        "invite_code": invite.invite_code,
+        "exam_id": exam.id,
+        "expires_at": invite.expires_at.isoformat(),
+        "max_attempts": invite.max_attempts,
+        "status": invite.status
+    }, 201
+# PUBLIC — VIEW MIXED EXAM USING INVITE CODE
+
+@api.get("/public/exams/<invite_code>")
+def get_public_mixed_exam(invite_code):
+
+    invite = ExamInvite.query.filter_by(
+        invite_code=invite_code,
+        status="active"
+    ).first()
+
+    if not invite:
+        return {"error": "Invalid or inactive invite code"}, 404
+
+    if invite.expires_at and datetime.utcnow() > invite.expires_at:
+        invite.status = "expired"
+        db.session.commit()
+        return {"error": "This invite has expired"}, 410
+
+    exam = MixedExam.query.get(invite.exam_id)
+
+    if not exam:
+        return {"error": "Exam not found"}, 404
+
+    sections = MixedExamSection.query.filter_by(
+        exam_id=exam.id
+    ).order_by(
+        MixedExamSection.order_index.asc()
+    ).all()
+
+    section_result = []
+
+    for section in sections:
+
+        questions = MixedExamQuestion.query.filter_by(
+            section_id=section.id
+        ).order_by(
+            MixedExamQuestion.order_index.asc()
+        ).all()
+
+        question_result = []
+
+        for item in questions:
+
+            data = {
+                "id": item.id,
+                "question_type": item.question_type,
+                "question_id": (
+                    item.mcq_question_id
+                    if item.question_type == "MCQ"
+                    else item.coding_question_id
+                ),
+                "marks": item.marks
+            }
+
+            if item.question_type == "MCQ":
+
+                question = Question.query.get(
+                    item.mcq_question_id
+                )
+
+                if question:
+                    data.update({
+                        "question_text": question.question_text,
+                        "option_a": question.option_a,
+                        "option_b": question.option_b,
+                        "option_c": question.option_c,
+                        "option_d": question.option_d
+                    })
+
+            else:
+
+                result = db.session.execute(
+                    text("""
+                        SELECT
+                            id,
+                            question_text,
+                            input_format,
+                            output_format,
+                            sample_input,
+                            sample_output,
+                            marks
+                        FROM coding_question
+                        WHERE id = :question_id
+                    """),
+                    {
+                        "question_id": item.coding_question_id
+                    }
+                ).mappings().first()
+
+                if result:
+                    data.update({
+                        "question_text": result["question_text"],
+                        "input_format": result["input_format"],
+                        "output_format": result["output_format"],
+                        "sample_input": result["sample_input"],
+                        "sample_output": result["sample_output"]
+                    })
+
+            question_result.append(data)
+
+        section_result.append({
+            "id": section.id,
+            "title": section.title,
+            "section_type": section.section_type,
+            "order_index": section.order_index,
+            "total_marks": section.total_marks,
+            "questions": question_result
+        })
+
+    return {
+        "exam_id": exam.id,
+        "title": exam.title,
+        "description": exam.description,
+        "duration": exam.duration,
+        "invite_code": invite.invite_code,
+        "expires_at": invite.expires_at.isoformat()
+        if invite.expires_at else None,
+        "max_attempts": invite.max_attempts,
+        "sections": section_result
+    }, 200
+
+# PUBLIC — START MIXED EXAM
+
+@api.post("/public/exams/<invite_code>/start")
+def start_mixed_exam(invite_code):
+
+    data = request.get_json() or {}
+
+    candidate_name = data.get("candidate_name")
+    candidate_email = data.get("candidate_email")
+
+    if not candidate_name or not candidate_email:
+        return {
+            "error": "candidate_name and candidate_email are required"
+        }, 400
+
+    invite = ExamInvite.query.filter_by(
+        invite_code=invite_code,
+        status="active"
+    ).first()
+
+    if not invite:
+        return {"error": "Invalid or inactive invite code"}, 404
+
+    if invite.expires_at and datetime.utcnow() > invite.expires_at:
+        invite.status = "expired"
+        db.session.commit()
+        return {"error": "This invite has expired"}, 410
+
+    existing_attempts = MixedExamAttempt.query.filter_by(
+        invite_id=invite.id
+    ).count()
+
+    if existing_attempts >= invite.max_attempts:
+        return {
+            "error": "Maximum attempts reached"
+        }, 403
+
+    exam = MixedExam.query.get(invite.exam_id)
+
+    if not exam:
+        return {"error": "Exam not found"}, 404
+
+    total_marks = db.session.query(
+        db.func.sum(MixedExamQuestion.marks)
+    ).join(
+        MixedExamSection,
+        MixedExamQuestion.section_id == MixedExamSection.id
+    ).filter(
+        MixedExamSection.exam_id == exam.id
+    ).scalar() or 0
+
+    attempt = MixedExamAttempt(
+        exam_id=exam.id,
+        invite_id=invite.id,
+        candidate_name=candidate_name,
+        candidate_email=candidate_email,
+        total_marks=total_marks,
+        status="started"
+    )
+
+    db.session.add(attempt)
+    db.session.commit()
+
+    return {
+        "message": "Exam started successfully",
+        "attempt_id": attempt.id,
+        "exam_id": exam.id,
+        "candidate_name": candidate_name,
+        "candidate_email": candidate_email,
+        "total_marks": total_marks,
+        "duration": exam.duration
+    }, 201
+
+# PUBLIC — SUBMIT MIXED EXAM
+@api.post("/public/exams/attempts/<int:attempt_id>/submit")
+def submit_mixed_exam(attempt_id):
+
+    data = request.get_json() or {}
+    answers = data.get("answers", [])
+
+    attempt = MixedExamAttempt.query.get(attempt_id)
+
+    if not attempt:
+        return {"error": "Attempt not found"}, 404
+
+    if attempt.status == "submitted":
+        return {"error": "Exam already submitted"}, 400
+
+    score = 0
+    submitted_answers = []
+
+    for item in answers:
+
+        question_id = item.get("question_id")
+        answer = item.get("answer")
+
+        mixed_question = MixedExamQuestion.query.get(
+            question_id
+        )
+
+        if not mixed_question:
+            continue
+
+        is_correct = False
+        marks_awarded = 0
+
+        # =====================================================
+        # MCQ
+        # =====================================================
+
+        if mixed_question.question_type == "MCQ":
+
+            question = Question.query.get(
+                mixed_question.mcq_question_id
+            )
+
+            if question:
+
+                if (
+                    answer
+                    and question.correct_answer
+                    and answer.upper()
+                    == question.correct_answer.upper()
+                ):
+                    is_correct = True
+                    marks_awarded = mixed_question.marks
+                    score += marks_awarded
+
+        # =====================================================
+        # CODING
+        # =====================================================
+
+        elif mixed_question.question_type == "CODING":
+
+            result = db.session.execute(
+                text("""
+                    SELECT
+                        id,
+                        test_cases,
+                        marks
+                    FROM coding_question
+                    WHERE id = :question_id
+                """),
+                {
+                    "question_id":
+                        mixed_question.coding_question_id
+                }
+            ).mappings().first()
+
+            if not result:
+                continue
+
+            coding_marks = int(
+                result["marks"]
+                or mixed_question.marks
+                or 1
+            )
+
+            test_cases_text = (
+                result["test_cases"] or ""
+            )
+
+            test_cases = []
+
+            # -------------------------------------------------
+            # Parse legacy test case format
+            #
+            # Example:
+            # 5 7|12;10 20|30;100 200|300
+            # -------------------------------------------------
+
+            for case in test_cases_text.split(";"):
+
+                if "|" in case:
+
+                    input_data, expected_output = (
+                        case.split("|", 1)
+                    )
+
+                    test_cases.append({
+                        "input":
+                            input_data.strip(),
+
+                        "expected":
+                            expected_output.strip()
+                    })
+
+            passed_tests = 0
+            total_tests = len(test_cases)
+
+            # -------------------------------------------------
+            # Run candidate code against every test case
+            # -------------------------------------------------
+
+            for test_case in test_cases:
+
+                execution = run_code(
+                    code=answer or "",
+                    language="python",
+                    input_data=test_case["input"]
+                )
+
+                actual_output = (
+                    execution.get(
+                        "stdout",
+                        ""
+                    ).strip()
+                )
+
+                expected_output = (
+                    test_case["expected"]
+                    .strip()
+                )
+
+                if (
+                    execution.get("status")
+                    == "success"
+                    and
+                    actual_output
+                    == expected_output
+                ):
+                    passed_tests += 1
+
+            # -------------------------------------------------
+            # Calculate coding marks
+            # -------------------------------------------------
+
+            if total_tests > 0:
+
+                marks_awarded = int(
+                    round(
+                        (
+                            passed_tests
+                            / total_tests
+                        )
+                        * coding_marks
+                    )
+                )
+
+            else:
+
+                marks_awarded = 0
+
+            # Full coding question is correct
+            # only when all test cases pass.
+
+            is_correct = (
+                total_tests > 0
+                and passed_tests == total_tests
+            )
+
+            score += marks_awarded
+
+        # =====================================================
+        # SAVE ANSWER
+        # =====================================================
+
+        submitted_answer = MixedExamAnswer(
+            attempt_id=attempt.id,
+            question_id=mixed_question.id,
+            answer=answer,
+            is_correct=is_correct,
+            marks_awarded=marks_awarded
+        )
+
+        db.session.add(submitted_answer)
+
+        submitted_answers.append({
+            "question_id":
+                mixed_question.id,
+
+            "question_type":
+                mixed_question.question_type,
+
+            "marks_awarded":
+                marks_awarded,
+
+            "is_correct":
+                is_correct
+        })
+
+    # =========================================================
+    # UPDATE ATTEMPT
+    # =========================================================
+
+    attempt.score = score
+
+    attempt.status = "submitted"
+
+    attempt.submitted_at = datetime.utcnow()
+
+    db.session.commit()
+
+    # =========================================================
+    # RESPONSE
+    # =========================================================
+
+    return {
+        "message":
+            "Exam submitted successfully",
+
+        "attempt_id":
+            attempt.id,
+
+        "score":
+            attempt.score,
+
+        "total_marks":
+            attempt.total_marks,
+
+        "status":
+            attempt.status,
+
+        "answers":
+            submitted_answers
+
+    }, 200# ============================================================
 # LEARNER — CODING EXAMS
 # ============================================================
 
@@ -13017,6 +14133,466 @@ def register_routes(app):
         url_prefix="/api"
     )
 
+# =========================================================
+# CALENDAR EVENTS
+# =========================================================
+
+@api.post("/calendar/events")
+@token_required
+def create_calendar_event(user):
+
+    data = request.get_json(silent=True) or {}
+
+    title = str(data.get("title", "")).strip()
+    description = str(data.get("description", "")).strip()
+    event_type = str(data.get("event_type", "")).strip().upper()
+
+    start_time = data.get("start_time")
+    end_time = data.get("end_time")
+    course_id = data.get("course_id")
+    meeting_link = data.get("meeting_link")
+    reminder_minutes = data.get("reminder_minutes", 30)
+
+    if not title:
+        return jsonify({
+            "error": "Title is required"
+        }), 400
+
+    if event_type not in [
+        "LIVE_CLASS",
+        "EXAM",
+        "ASSIGNMENT"
+    ]:
+        return jsonify({
+            "error": "Invalid event type"
+        }), 400
+
+    if not start_time:
+        return jsonify({
+            "error": "start_time is required"
+        }), 400
+
+    try:
+        start_datetime = datetime.fromisoformat(
+            start_time.replace("Z", "+00:00")
+        )
+
+        end_datetime = None
+
+        if end_time:
+            end_datetime = datetime.fromisoformat(
+                end_time.replace("Z", "+00:00")
+            )
+
+    except ValueError:
+        return jsonify({
+            "error": "Invalid date/time format"
+        }), 400
+
+    # Validate course if provided
+    if course_id:
+
+        course = Course.query.get(course_id)
+
+        if not course:
+            return jsonify({
+                "error": "Course not found"
+            }), 404
+
+    # Trainer who creates the event
+    trainer_id = None
+
+    if getattr(user, "role", "").upper() == "TRAINER":
+
+        trainer = Trainer.query.filter_by(
+            user_id=user.id
+        ).first()
+
+        if trainer:
+            trainer_id = trainer.id
+
+    event = CalendarEvent(
+        title=title,
+        description=description,
+        event_type=event_type,
+        start_time=start_datetime,
+        end_time=end_datetime,
+        course_id=course_id,
+        trainer_id=trainer_id,
+        meeting_link=meeting_link,
+        reminder_minutes=reminder_minutes,
+        status="scheduled"
+    )
+
+    db.session.add(event)
+    db.session.commit()
+
+    return jsonify({
+        "message": "Calendar event created successfully",
+        "event": {
+            "id": event.id,
+            "title": event.title,
+            "description": event.description,
+            "event_type": event.event_type,
+            "start_time": event.start_time.isoformat(),
+            "end_time": (
+                event.end_time.isoformat()
+                if event.end_time
+                else None
+            ),
+            "course_id": event.course_id,
+            "trainer_id": event.trainer_id,
+            "meeting_link": event.meeting_link,
+            "reminder_minutes": event.reminder_minutes,
+            "status": event.status
+        }
+    }), 201
+@api.get("/calendar/events")
+@token_required
+def get_calendar_events(user):
+
+    start_date = request.args.get("start")
+    end_date = request.args.get("end")
+
+    events = []
+
+    # =========================================================
+    # 1. CALENDAR EVENTS
+    # =========================================================
+
+    query = CalendarEvent.query
+
+    if start_date:
+        try:
+            start_datetime = datetime.fromisoformat(start_date)
+            query = query.filter(
+                CalendarEvent.start_time >= start_datetime
+            )
+        except ValueError:
+            return jsonify({
+                "error": "Invalid start date"
+            }), 400
+
+    if end_date:
+        try:
+            end_datetime = datetime.fromisoformat(end_date)
+            query = query.filter(
+                CalendarEvent.start_time <= end_datetime
+            )
+        except ValueError:
+            return jsonify({
+                "error": "Invalid end date"
+            }), 400
+
+    calendar_events = query.order_by(
+        CalendarEvent.start_time.asc()
+    ).all()
+
+    for event in calendar_events:
+
+        course_title = None
+
+        if event.course_id:
+            course = Course.query.get(event.course_id)
+
+            if course:
+                course_title = course.title
+
+        events.append({
+            "id": event.id,
+            "title": event.title,
+            "description": event.description,
+            "event_type": event.event_type,
+            "start_time": event.start_time.isoformat(),
+            "end_time": (
+                event.end_time.isoformat()
+                if event.end_time
+                else None
+            ),
+            "course_id": event.course_id,
+            "course_title": course_title,
+            "trainer_id": event.trainer_id,
+            "meeting_link": event.meeting_link,
+            "reminder_minutes": event.reminder_minutes,
+            "status": event.status
+        })
+
+    # =========================================================
+    # 2. EXAMS / QUIZZES
+    # =========================================================
+
+    quizzes = Quiz.query.all()
+
+    for quiz in quizzes:
+
+        # Quiz currently has no scheduled date in the model
+        # so only include it if a future scheduling field exists.
+        scheduled_time = getattr(
+            quiz,
+            "scheduled_at",
+            None
+        )
+
+        if not scheduled_time:
+            continue
+
+        if start_date and scheduled_time < start_datetime:
+            continue
+
+        if end_date and scheduled_time > end_datetime:
+            continue
+
+        course = Course.query.get(
+            quiz.course_id
+        )
+
+        events.append({
+            "id": f"quiz-{quiz.id}",
+            "title": quiz.title,
+            "description": quiz.description,
+            "event_type": "EXAM",
+            "start_time": scheduled_time.isoformat(),
+            "end_time": None,
+            "course_id": quiz.course_id,
+            "course_title": (
+                course.title
+                if course
+                else None
+            ),
+            "trainer_id": (
+                course.trainer_id
+                if course
+                else None
+            ),
+            "meeting_link": None,
+            "reminder_minutes": 30,
+            "status": "scheduled"
+        })
+
+    # =========================================================
+    # 3. ASSIGNMENT DUE DATES
+    # =========================================================
+
+    assignments = Assignment.query.filter(
+        Assignment.due_date.isnot(None)
+    ).all()
+
+    for assignment in assignments:
+
+        due_date = assignment.due_date
+
+        if start_date and due_date < start_datetime:
+            continue
+
+        if end_date and due_date > end_datetime:
+            continue
+
+        course = Course.query.get(
+            assignment.course_id
+        )
+
+        events.append({
+            "id": f"assignment-{assignment.id}",
+            "title": f"Assignment Due: {assignment.title}",
+            "description": assignment.description,
+            "event_type": "ASSIGNMENT",
+            "start_time": due_date.isoformat(),
+            "end_time": None,
+            "course_id": assignment.course_id,
+            "course_title": (
+                course.title
+                if course
+                else None
+            ),
+            "trainer_id": assignment.trainer_id,
+            "meeting_link": None,
+            "reminder_minutes": 30,
+            "status": "scheduled"
+        })
+
+    # Sort everything by date/time
+    events.sort(
+        key=lambda event: event["start_time"]
+    )
+
+    return jsonify({
+        "events": events
+    }), 200
+@api.post("/calendar/exams/<int:quiz_id>/schedule")
+@token_required
+def schedule_calendar_exam(user, quiz_id):
+
+    # Only trainers can schedule exams
+    if str(user.role).upper() != "TRAINER":
+        return jsonify({
+            "error": "Only trainers can schedule exams"
+        }), 403
+
+    quiz = Quiz.query.get(quiz_id)
+
+    if not quiz:
+        return jsonify({
+            "error": "Exam not found"
+        }), 404
+
+    data = request.get_json(silent=True) or {}
+
+    scheduled_at = data.get("scheduled_at")
+
+    if not scheduled_at:
+        return jsonify({
+            "error": "scheduled_at is required"
+        }), 400
+
+    try:
+        quiz.scheduled_at = datetime.fromisoformat(
+            scheduled_at.replace("Z", "+00:00")
+        )
+    except ValueError:
+        return jsonify({
+            "error": "Invalid date/time format"
+        }), 400
+
+    # Find learners enrolled in this course
+    enrollments = Enrollment.query.filter_by(
+        course_id=quiz.course_id
+    ).all()
+
+    # Create notification for each enrolled learner
+    for enrollment in enrollments:
+
+        learner = Learner.query.get(enrollment.learner_id)
+
+        if learner:
+            create_notification(
+                user_id=learner.user_id,
+                title="Exam Scheduled",
+                message=f"{quiz.title} has been scheduled.",
+                notification_type="EXAM_SCHEDULED",
+                related_id=quiz.id,
+                related_type="QUIZ"
+            )
+
+    db.session.commit()
+
+    return jsonify({
+        "message": "Exam scheduled successfully",
+        "exam": {
+            "id": quiz.id,
+            "title": quiz.title,
+            "course_id": quiz.course_id,
+            "scheduled_at": (
+                quiz.scheduled_at.isoformat()
+                if quiz.scheduled_at
+                else None
+            )
+        }
+    }), 200
+@api.get("/calendar/reminders")
+@token_required
+def get_calendar_reminders(user):
+    now = datetime.utcnow()
+
+    events = CalendarEvent.query.filter(
+        CalendarEvent.status == "scheduled"
+    ).all()
+
+    reminders = []
+
+    for event in events:
+        reminder_time = event.start_time - timedelta(
+            minutes=event.reminder_minutes or 30
+        )
+
+        if reminder_time <= now <= event.start_time:
+            reminders.append({
+                "id": event.id,
+                "title": event.title,
+                "event_type": event.event_type,
+                "start_time": event.start_time.isoformat(),
+                "meeting_link": event.meeting_link,
+                "reminder_minutes": event.reminder_minutes,
+                "message": f"{event.title} starts in {event.reminder_minutes or 30} minutes"
+            })
+
+    return jsonify({
+        "reminders": reminders
+    }), 200
+# ==================== NOTIFICATIONS ====================
+
+@api.get("/notifications")
+@token_required
+def get_notifications(user):
+    notifications = Notification.query.filter_by(
+        user_id=user.id
+    ).order_by(
+        Notification.created_at.desc()
+    ).all()
+
+    result = []
+
+    for notification in notifications:
+        result.append({
+            "id": notification.id,
+            "title": notification.title,
+            "message": notification.message,
+            "notification_type": notification.notification_type,
+            "is_read": notification.is_read,
+            "related_id": notification.related_id,
+            "related_type": notification.related_type,
+            "created_at": notification.created_at.isoformat()
+                if notification.created_at else None
+        })
+
+    unread_count = Notification.query.filter_by(
+        user_id=user.id,
+        is_read=False
+    ).count()
+
+    return jsonify({
+        "notifications": result,
+        "unread_count": unread_count
+    }), 200
+
+
+@api.post("/notifications/<int:notification_id>/read")
+@token_required
+def mark_notification_read(user, notification_id):
+    notification = Notification.query.filter_by(
+        id=notification_id,
+        user_id=user.id
+    ).first()
+
+    if not notification:
+        return jsonify({
+            "error": "Notification not found"
+        }), 404
+
+    notification.is_read = True
+    db.session.commit()
+
+    return jsonify({
+        "message": "Notification marked as read",
+        "notification_id": notification.id,
+        "is_read": notification.is_read
+    }), 200
+
+
+@api.post("/notifications/read-all")
+@token_required
+def mark_all_notifications_read(user):
+    Notification.query.filter_by(
+        user_id=user.id,
+        is_read=False
+    ).update({
+        "is_read": True
+    })
+
+    db.session.commit()
+
+    return jsonify({
+        "message": "All notifications marked as read"
+    }), 200
 
 # ============================================================
 # END OF routes.py

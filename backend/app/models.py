@@ -601,8 +601,86 @@ class AssignmentSubmission(db.Model):
         db.Text,
         default=""
     )
+#======================================================
+# =========================================================
+# CALENDAR EVENT
+# =========================================================
 
+class CalendarEvent(db.Model):
+    __tablename__ = "calendar_event"
 
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    title = db.Column(
+        db.String(200),
+        nullable=False
+    )
+
+    description = db.Column(
+        db.Text,
+        default=""
+    )
+
+    event_type = db.Column(
+        db.String(30),
+        nullable=False
+    )
+
+    start_time = db.Column(
+        db.DateTime,
+        nullable=False
+    )
+
+    end_time = db.Column(
+        db.DateTime,
+        nullable=True
+    )
+
+    course_id = db.Column(
+        db.String(80),
+        db.ForeignKey("course.id"),
+        nullable=True
+    )
+
+    trainer_id = db.Column(
+        db.Integer,
+        db.ForeignKey("trainer.id"),
+        nullable=True
+    )
+
+    meeting_link = db.Column(
+        db.Text,
+        nullable=True
+    )
+
+    related_id = db.Column(
+        db.Integer,
+        nullable=True
+    )
+
+    reminder_minutes = db.Column(
+        db.Integer,
+        default=30
+    )
+
+    status = db.Column(
+        db.String(20),
+        default="scheduled"
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+
+    updated_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow
+    )
 # =========================================================
 # QUIZ
 # =========================================================
@@ -634,6 +712,10 @@ class Quiz(db.Model):
     total_marks = db.Column(
         db.Integer,
         default=0
+    )
+    scheduled_at = db.Column(
+    db.DateTime,
+    nullable=True
     )
 
     created_at = db.Column(
@@ -1030,7 +1112,82 @@ class Discussion(db.Model):
         default=datetime.utcnow
     )
 
+#==========================================================
+class DiscussionReply(db.Model):
+    __tablename__ = "discussion_reply"
 
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    discussion_id = db.Column(
+        db.Integer,
+        db.ForeignKey("discussion.id"),
+        nullable=False
+    )
+
+    user_id = db.Column(
+        db.Integer,
+        db.ForeignKey("user.id"),
+        nullable=False
+    )
+
+    message = db.Column(
+        db.Text,
+        nullable=False
+    )
+
+    is_accepted = db.Column(
+        db.Boolean,
+        default=False
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+
+
+class DiscussionLike(db.Model):
+    __tablename__ = "discussion_like"
+
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    user_id = db.Column(
+        db.Integer,
+        db.ForeignKey("user.id"),
+        nullable=False
+    )
+
+    discussion_id = db.Column(
+        db.Integer,
+        db.ForeignKey("discussion.id"),
+        nullable=True
+    )
+
+    reply_id = db.Column(
+        db.Integer,
+        db.ForeignKey("discussion_reply.id"),
+        nullable=True
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "user_id",
+            "discussion_id",
+            "reply_id",
+            name="uq_discussion_like"
+        ),
+    )
 # =========================================================
 # WISHLIST
 # =========================================================
@@ -1446,3 +1603,311 @@ class CodingExamScreenshot(db.Model):
         default=datetime.utcnow,
         nullable=False
     )
+class MixedExam(db.Model):
+    __tablename__ = "mixed_exam"
+
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    title = db.Column(
+        db.String(200),
+        nullable=False
+    )
+
+    description = db.Column(
+        db.Text,
+        default=""
+    )
+
+    course_id = db.Column(
+        db.String(80),
+        db.ForeignKey("course.id"),
+        nullable=True
+    )
+
+    trainer_id = db.Column(
+        db.Integer,
+        db.ForeignKey("trainer.id"),
+        nullable=False
+    )
+
+    duration = db.Column(
+        db.Integer,
+        default=60
+    )
+
+    total_marks = db.Column(
+        db.Integer,
+        default=0
+    )
+
+    status = db.Column(
+        db.String(20),
+        default="draft"
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+
+    updated_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow
+    )
+
+class MixedExamSection(db.Model):
+    __tablename__ = "mixed_exam_section"
+
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    exam_id = db.Column(
+        db.Integer,
+        db.ForeignKey("mixed_exam.id"),
+        nullable=False
+    )
+
+    title = db.Column(
+        db.String(200),
+        nullable=False
+    )
+
+    section_type = db.Column(
+        db.String(20),
+        nullable=False
+    )
+
+    order_index = db.Column(
+        db.Integer,
+        default=0
+    )
+
+    total_marks = db.Column(
+        db.Integer,
+        default=0
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+class MixedExamQuestion(db.Model):
+    __tablename__ = "mixed_exam_question"
+
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    section_id = db.Column(
+        db.Integer,
+        db.ForeignKey("mixed_exam_section.id"),
+        nullable=False
+    )
+
+    question_type = db.Column(
+        db.String(20),
+        nullable=False
+    )
+
+    mcq_question_id = db.Column(
+        db.Integer,
+        db.ForeignKey("question.id"),
+        nullable=True
+    )
+
+    coding_question_id = db.Column(
+        db.Integer,
+        db.ForeignKey("coding_question.id"),
+        nullable=True
+    )
+
+    order_index = db.Column(
+        db.Integer,
+        default=0
+    )
+
+    marks = db.Column(
+        db.Integer,
+        default=1
+    )
+class QuestionBank(db.Model):
+    __tablename__ = "question_bank"
+
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    question_type = db.Column(
+        db.String(20),
+        nullable=False
+    )
+
+    mcq_question_id = db.Column(
+        db.Integer,
+        db.ForeignKey("question.id"),
+        nullable=True
+    )
+
+    coding_question_id = db.Column(
+        db.Integer,
+        db.ForeignKey("coding_question.id"),
+        nullable=True
+    )
+
+    trainer_id = db.Column(
+        db.Integer,
+        db.ForeignKey("trainer.id"),
+        nullable=False
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+class ExamInvite(db.Model):
+    __tablename__ = "exam_invite"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    exam_id = db.Column(
+        db.Integer,
+        db.ForeignKey("mixed_exam.id"),
+        nullable=False
+    )
+
+    invite_code = db.Column(
+        db.String(50),
+        unique=True,
+        nullable=False
+    )
+
+    expires_at = db.Column(
+        db.DateTime,
+        nullable=True
+    )
+
+    max_attempts = db.Column(
+        db.Integer,
+        default=1
+    )
+
+    status = db.Column(
+        db.String(20),
+        default="active"
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+class MixedExamAttempt(db.Model):
+    __tablename__ = "mixed_exam_attempt"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    exam_id = db.Column(
+        db.Integer,
+        db.ForeignKey("mixed_exam.id"),
+        nullable=False
+    )
+
+    invite_id = db.Column(
+        db.Integer,
+        db.ForeignKey("exam_invite.id"),
+        nullable=False
+    )
+
+    candidate_name = db.Column(
+        db.String(150),
+        nullable=False
+    )
+
+    candidate_email = db.Column(
+        db.String(200),
+        nullable=False
+    )
+
+    score = db.Column(
+        db.Integer,
+        default=0
+    )
+
+    total_marks = db.Column(
+        db.Integer,
+        default=0
+    )
+
+    status = db.Column(
+        db.String(20),
+        default="started"
+    )
+
+    started_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+
+    submitted_at = db.Column(
+        db.DateTime,
+        nullable=True
+    )
+
+
+class MixedExamAnswer(db.Model):
+    __tablename__ = "mixed_exam_answer"
+
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    attempt_id = db.Column(
+        db.Integer,
+        db.ForeignKey("mixed_exam_attempt.id"),
+        nullable=False
+    )
+
+    question_id = db.Column(
+        db.Integer,
+        db.ForeignKey("mixed_exam_question.id"),
+        nullable=False
+    )
+
+    answer = db.Column(
+        db.Text,
+        nullable=True
+    )
+
+    is_correct = db.Column(
+        db.Boolean,
+        default=False
+    )
+
+    marks_awarded = db.Column(
+        db.Integer,
+        default=0
+    )
+class Notification(db.Model):
+    __tablename__ = "notification"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+
+    title = db.Column(db.String(200), nullable=False)
+    message = db.Column(db.Text, nullable=False)
+    notification_type = db.Column(db.String(50), nullable=False)
+
+    is_read = db.Column(db.Boolean, default=False)
+
+    related_id = db.Column(db.Integer, nullable=True)
+    related_type = db.Column(db.String(50), nullable=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
