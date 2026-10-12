@@ -185,6 +185,24 @@ class Learner(db.Model):
         db.String(20),
         default="active"
     )
+    
+    xp_points = db.Column(
+        db.Integer,
+        default=0,
+        nullable=False
+    )
+
+    current_streak = db.Column(
+        db.Integer,
+        default=0,
+        nullable=False
+    )
+
+    last_activity_date = db.Column(
+        db.Date,
+        nullable=True
+    )
+
 
     user = db.relationship(
         "User",
@@ -514,6 +532,49 @@ class LessonProgress(db.Model):
             "learner_id",
             "lesson_id",
             name="uq_lesson_progress"
+        ),
+    )
+
+#========================================================
+class LessonNote(db.Model):
+    __tablename__ = "lesson_note"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    learner_id = db.Column(
+        db.Integer,
+        db.ForeignKey("learner.id"),
+        nullable=False
+    )
+
+    lesson_id = db.Column(
+        db.String(80),
+        db.ForeignKey("lesson.id"),
+        nullable=False
+    )
+
+    content = db.Column(
+        db.Text,
+        nullable=False,
+        default=""
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+
+    updated_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "learner_id",
+            "lesson_id",
+            name="uq_learner_lesson_note"
         ),
     )
 # =========================================================
@@ -1911,3 +1972,133 @@ class Notification(db.Model):
     related_type = db.Column(db.String(50), nullable=True)
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+# =========================================================
+# GAMIFICATION - BADGES
+# =========================================================
+
+class Badge(db.Model):
+    __tablename__ = "badges"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    name = db.Column(
+        db.String(100),
+        unique=True,
+        nullable=False
+    )
+
+    description = db.Column(db.String(255), default="")
+
+    xp_reward = db.Column(db.Integer, default=0, nullable=False)
+
+
+class UserBadge(db.Model):
+    __tablename__ = "user_badges"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    learner_id = db.Column(
+        db.Integer,
+        db.ForeignKey("learner.id"),
+        nullable=False
+    )
+
+    badge_id = db.Column(
+        db.Integer,
+        db.ForeignKey("badges.id"),
+        nullable=False
+    )
+
+    earned_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "learner_id",
+            "badge_id",
+            name="uq_learner_badge"
+        ),
+    )
+
+# =========================================================
+# AI TUTOR CHAT HISTORY
+# =========================================================
+
+class AITutorChat(db.Model):
+    __tablename__ = "ai_tutor_chat"
+
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    learner_id = db.Column(
+        db.Integer,
+        db.ForeignKey("learner.id"),
+        nullable=False,
+        index=True
+    )
+
+    lesson_id = db.Column(
+        db.String(80),
+        db.ForeignKey("lesson.id"),
+        nullable=False,
+        index=True
+    )
+
+    question = db.Column(
+        db.Text,
+        nullable=False
+    )
+
+    answer = db.Column(
+        db.Text,
+        nullable=False
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        nullable=False,
+        server_default=db.func.current_timestamp()
+    )
+
+class PasswordResetToken(db.Model):
+    __tablename__ = "password_reset_token"
+
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
+
+    user_id = db.Column(
+        db.Integer,
+        db.ForeignKey("user.id"),
+        nullable=False,
+        index=True
+    )
+
+    token_hash = db.Column(
+        db.String(64),
+        nullable=False,
+        unique=True
+    )
+
+    expires_at = db.Column(
+        db.DateTime,
+        nullable=False
+    )
+
+    used_at = db.Column(
+        db.DateTime,
+        nullable=True
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        nullable=False,
+        default=datetime.utcnow
+    )

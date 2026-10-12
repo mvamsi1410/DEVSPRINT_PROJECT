@@ -12,18 +12,20 @@ import csv
 import qrcode
 from openpyxl import Workbook
 from .code_runner.runner import run_code
+import re
 
 from flask import send_file
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 import secrets
+import hashlib
 import os
 import random
 import json
 import uuid
 from datetime import datetime, timedelta, date
-
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
 
 
 from . import db
@@ -32,11 +34,17 @@ from .models import (
     User,
     Trainer,
     Learner,
+    AITutorChat,
     Batch,
+    Badge,
+    UserBadge,
+    PasswordResetToken,
+    User,
     Course,
     CourseDocument,
     Module,
     Lesson,
+    LessonNote,
     Enrollment,
     Assignment,
     AssignmentSubmission,
@@ -795,6 +803,56 @@ def login():
         "token":
             make_token(authenticated_user),
     })
+    
+@api.post("/auth/forgot-password")
+def forgot_password():
+    data = request.get_json(silent=True) or {}
+
+    email = str(data.get("email", "")).strip().lower()
+
+    if not email:
+        return jsonify({
+            "message": "If the email is registered, reset instructions will be sent."
+        }), 200
+
+    user = User.query.filter_by(email=email).first()
+
+    if user:
+        try:
+            PasswordResetToken.query.filter_by(
+                user_id=user.id,
+                used_at=None
+            ).update({"used_at": datetime.utcnow()})
+
+            raw_token = secrets.token_urlsafe(32)
+            token_hash = hashlib.sha256(
+                raw_token.encode("utf-8")
+            ).hexdigest()
+
+            reset_record = PasswordResetToken(
+                user_id=user.id,
+                token_hash=token_hash,
+                expires_at=datetime.utcnow() + timedelta(minutes=30)
+            )
+
+            db.session.add(reset_record)
+            db.session.commit()
+
+            current_app.logger.info(
+                "Password reset token created for user ID %s.",
+                user.id
+            )
+
+        except Exception:
+            db.session.rollback()
+            current_app.logger.exception(
+                "Failed to create password reset token"
+            )
+
+    return jsonify({
+        "message": "If the email is registered, reset instructions will be sent."
+    }), 200
+
 
 # =========================================================
 # AUTH - CURRENT USER
@@ -2669,10 +2727,6 @@ def update_lesson_progress(user, lesson_id):
     if requested_learning_time < 0:
         requested_learning_time = 0
 
-    # --------------------------------------------------------
-    # Validate lesson learning time
-    # --------------------------------------------------------
-
     lesson_duration_seconds = duration_to_seconds(
         lesson.duration
     )
@@ -2686,29 +2740,25 @@ def update_lesson_progress(user, lesson_id):
         lesson_duration_seconds * 0.75
     )
 
-    lesson_completed = (
-        validated_learning_time >= lesson_minimum_time
-    )
-
-    # --------------------------------------------------------
-    # Create or update lesson progress
-    # --------------------------------------------------------
-
     progress = LessonProgress.query.filter_by(
         learner_id=learner.id,
         lesson_id=lesson_id
     ).first()
 
+    was_completed = bool(
+        progress and progress.completed
+    )
+
     if not progress:
         progress = LessonProgress(
             learner_id=learner.id,
             lesson_id=lesson_id,
-            completed=lesson_completed,
+            completed=(
+                validated_learning_time >= lesson_minimum_time
+            ),
             learning_time_seconds=validated_learning_time
         )
-
         db.session.add(progress)
-
     else:
         progress.learning_time_seconds = max(
             progress.learning_time_seconds or 0,
@@ -2716,28 +2766,82 @@ def update_lesson_progress(user, lesson_id):
         )
 
         progress.completed = (
-            progress.learning_time_seconds
-            >= lesson_minimum_time
+            progress.learning_time_seconds >= lesson_minimum_time
         )
 
-    # --------------------------------------------------------
-    # Find course through lesson's module
-    # --------------------------------------------------------
+    # Award lesson XP only on first completion.
+    if progress.completed and not was_completed:
+        learner.xp_points = (
+            (learner.xp_points or 0) + 10
+        )
 
-    module = Module.query.get(
-        lesson.module_id
-    )
+        today = date.today()
 
+        if learner.last_activity_date != today:
+            if learner.last_activity_date == (
+                today - timedelta(days=1)
+            ):
+                learner.current_streak = (
+                    (learner.current_streak or 0) + 1
+                )
+            else:
+                learner.current_streak = 1
+
+            learner.last_activity_date = today
+
+    # Count completed lessons for this learner.
+    completed_total = LessonProgress.query.filter_by(
+        learner_id=learner.id,
+        completed=True
+    ).count()
+
+    # Award achievement badges once.
+    badge_rules = [
+        (
+            completed_total >= 10,
+            "10 Lessons Completed"
+        ),
+        (
+            (learner.current_streak or 0) >= 7,
+            "7-Day Streak"
+        )
+    ]
+
+    for condition, badge_name in badge_rules:
+        if not condition:
+            continue
+
+        badge = Badge.query.filter_by(
+            name=badge_name
+        ).first()
+
+        if badge is None:
+            continue
+
+        earned = UserBadge.query.filter_by(
+            learner_id=learner.id,
+            badge_id=badge.id
+        ).first()
+
+        if earned is None:
+            db.session.add(
+                UserBadge(
+                    learner_id=learner.id,
+                    badge_id=badge.id
+                )
+            )
+
+            learner.xp_points = (
+                (learner.xp_points or 0)
+                + (badge.xp_reward or 0)
+            )
+
+    # Find the course associated with this lesson.
+    module = Module.query.get(lesson.module_id)
     course = None
 
     if module:
-        course = Course.query.get(
-            module.course_id
-        )
-
-    # --------------------------------------------------------
-    # Recalculate course progress
-    # --------------------------------------------------------
+        course = Course.query.get(module.course_id)
 
     if course:
         course_lessons = (
@@ -2746,106 +2850,58 @@ def update_lesson_progress(user, lesson_id):
                 Module,
                 Lesson.module_id == Module.id
             )
-            .filter(
-                Module.course_id == course.id
-            )
+            .filter(Module.course_id == course.id)
             .all()
         )
 
         lesson_ids = [
-            item.id
-            for item in course_lessons
+            item.id for item in course_lessons
         ]
 
         if lesson_ids:
-
-            # ------------------------------------------------
-            # Count completed lessons
-            # ------------------------------------------------
-
-            completed_count = (
-                LessonProgress.query
-                .filter(
-                    LessonProgress.learner_id == learner.id,
-                    LessonProgress.lesson_id.in_(lesson_ids),
-                    LessonProgress.completed.is_(True)
-                )
-                .count()
-            )
-
-            # ------------------------------------------------
-            # Calculate total course duration
-            # ------------------------------------------------
+            completed_count = LessonProgress.query.filter(
+                LessonProgress.learner_id == learner.id,
+                LessonProgress.lesson_id.in_(lesson_ids),
+                LessonProgress.completed.is_(True)
+            ).count()
 
             total_course_duration = sum(
                 duration_to_seconds(item.duration)
                 for item in course_lessons
             )
 
-            # ------------------------------------------------
-            # Calculate validated learning time
-            # ------------------------------------------------
-
-            progress_records = (
-                LessonProgress.query
-                .filter(
-                    LessonProgress.learner_id == learner.id,
-                    LessonProgress.lesson_id.in_(lesson_ids)
-                )
-                .all()
-            )
+            progress_records = LessonProgress.query.filter(
+                LessonProgress.learner_id == learner.id,
+                LessonProgress.lesson_id.in_(lesson_ids)
+            ).all()
 
             total_learning_time = 0
 
+            duration_by_lesson = {
+                item.id: duration_to_seconds(item.duration)
+                for item in course_lessons
+            }
+
             for record in progress_records:
-
-                lesson_duration = next(
-                    (
-                        item.duration
-                        for item in course_lessons
-                        if item.id == record.lesson_id
-                    ),
-                    "00:00"
-                )
-
-                lesson_duration_seconds = (
-                    duration_to_seconds(
-                        lesson_duration
-                    )
-                )
-
                 validated_time = min(
                     record.learning_time_seconds or 0,
-                    lesson_duration_seconds
+                    duration_by_lesson.get(record.lesson_id, 0)
                 )
 
                 total_learning_time += validated_time
-
-            # ------------------------------------------------
-            # Maximum allowed = 100% of course duration
-            # ------------------------------------------------
 
             total_learning_time = min(
                 total_learning_time,
                 total_course_duration
             )
 
-            # ------------------------------------------------
-            # Minimum required = 75% of course duration
-            # ------------------------------------------------
-
             minimum_learning_time = int(
                 total_course_duration * 0.75
             )
 
             learning_time_valid = (
-                total_learning_time
-                >= minimum_learning_time
+                total_learning_time >= minimum_learning_time
             )
-
-            # ------------------------------------------------
-            # Course completion
-            # ------------------------------------------------
 
             if (
                 completed_count == len(lesson_ids)
@@ -2856,16 +2912,8 @@ def update_lesson_progress(user, lesson_id):
                 percentage = int(
                     (completed_count / len(lesson_ids)) * 100
                 )
-
         else:
-            total_course_duration = 0
-            total_learning_time = 0
-            minimum_learning_time = 0
             percentage = 0
-
-        # ----------------------------------------------------
-        # Update enrollment
-        # ----------------------------------------------------
 
         enrollment = Enrollment.query.filter_by(
             learner_id=learner.id,
@@ -2878,21 +2926,37 @@ def update_lesson_progress(user, lesson_id):
             if percentage >= 100:
                 enrollment.status = "completed"
 
-                # --------------------------------------------
-                # Generate certificate automatically
-                # --------------------------------------------
+                # Award the first-course badge only once.
+                first_course_badge = Badge.query.filter_by(
+                    name="First Course Completed"
+                ).first()
 
-                existing_certificate = (
-                    Certificate.query
-                    .filter_by(
+                if first_course_badge:
+                    earned = UserBadge.query.filter_by(
                         learner_id=learner.id,
-                        course_id=course.id
-                    )
-                    .first()
-                )
+                        badge_id=first_course_badge.id
+                    ).first()
+
+                    if earned is None:
+                        db.session.add(
+                            UserBadge(
+                                learner_id=learner.id,
+                                badge_id=first_course_badge.id
+                            )
+                        )
+
+                        learner.xp_points = (
+                            (learner.xp_points or 0)
+                            + (first_course_badge.xp_reward or 0)
+                        )
+
+                # Create a certificate if one does not exist.
+                existing_certificate = Certificate.query.filter_by(
+                    learner_id=learner.id,
+                    course_id=course.id
+                ).first()
 
                 if not existing_certificate:
-
                     now = datetime.utcnow()
 
                     certificate_id = (
@@ -2912,10 +2976,7 @@ def update_lesson_progress(user, lesson_id):
                     )
 
                     db.session.add(certificate)
-
-                    # ----------------------------------------
-                    # Certificate notification
-                    # ----------------------------------------
+                    db.session.flush()
 
                     create_notification(
                         user_id=learner.user_id,
@@ -2929,16 +2990,17 @@ def update_lesson_progress(user, lesson_id):
                         related_type="CERTIFICATE"
                     )
 
-            db.session.commit()
+    db.session.commit()
 
     return jsonify({
         "message": "Lesson progress updated",
         "lesson_id": lesson_id,
         "completed": bool(progress.completed),
-        "learning_time_seconds": (
-            progress.learning_time_seconds
-        )
+        "learning_time_seconds": progress.learning_time_seconds,
+        "xp_points": learner.xp_points,
+        "current_streak": learner.current_streak
     }), 200
+
 
 @api.get("/learner/courses/<string:course_id>/progress")
 @role_required("learner")
@@ -3081,6 +3143,115 @@ def get_course_progress(user, course_id):
             else None
         )
     }), 200
+
+
+@api.get("/learner/lessons/<string:lesson_id>/notes")
+@role_required("learner")
+def get_lesson_notes(user, lesson_id):
+    learner = Learner.query.filter_by(user_id=user.id).first()
+
+    if not learner:
+        return jsonify({"error": "Learner not found"}), 404
+
+    lesson = Lesson.query.get(lesson_id)
+    if not lesson:
+        return jsonify({"error": "Lesson not found"}), 404
+
+    note = LessonNote.query.filter_by(
+        learner_id=learner.id,
+        lesson_id=lesson_id
+    ).first()
+
+    if not note:
+        return jsonify({"note": None}), 200
+
+    return jsonify({
+        "note": {
+            "id": note.id,
+            "lesson_id": note.lesson_id,
+            "content": note.content,
+            "created_at": note.created_at.isoformat()
+                if note.created_at else None,
+            "updated_at": note.updated_at.isoformat()
+                if note.updated_at else None
+        }
+    }), 200
+
+
+@api.post("/learner/lessons/<string:lesson_id>/notes")
+@role_required("learner")
+def save_lesson_notes(user, lesson_id):
+    learner = Learner.query.filter_by(user_id=user.id).first()
+
+    if not learner:
+        return jsonify({"error": "Learner not found"}), 404
+
+    lesson = Lesson.query.get(lesson_id)
+    if not lesson:
+        return jsonify({"error": "Lesson not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    content = data.get("content")
+
+    if not isinstance(content, str):
+        return jsonify({
+            "error": "Content must be a string"
+        }), 400
+
+    note = LessonNote.query.filter_by(
+        learner_id=learner.id,
+        lesson_id=lesson_id
+    ).first()
+
+    if note:
+        note.content = content
+    else:
+        note = LessonNote(
+            learner_id=learner.id,
+            lesson_id=lesson_id,
+            content=content
+        )
+        db.session.add(note)
+
+    db.session.commit()
+
+    return jsonify({
+        "message": "Lesson notes saved successfully",
+        "note": {
+            "id": note.id,
+            "lesson_id": note.lesson_id,
+            "content": note.content,
+            "created_at": note.created_at.isoformat()
+                if note.created_at else None,
+            "updated_at": note.updated_at.isoformat()
+                if note.updated_at else None
+        }
+    }), 200
+
+
+@api.delete("/learner/lessons/<string:lesson_id>/notes")
+@role_required("learner")
+def delete_lesson_notes(user, lesson_id):
+    learner = Learner.query.filter_by(user_id=user.id).first()
+
+    if not learner:
+        return jsonify({"error": "Learner not found"}), 404
+
+    note = LessonNote.query.filter_by(
+        learner_id=learner.id,
+        lesson_id=lesson_id
+    ).first()
+
+    if not note:
+        return jsonify({"error": "Notes not found"}), 404
+
+    db.session.delete(note)
+    db.session.commit()
+
+    return jsonify({
+        "message": "Lesson notes deleted successfully"
+    }), 200
+
 # ============================================================
 # LEARNER - LEADERBOARD
 # ============================================================
@@ -3090,7 +3261,6 @@ def get_course_progress(user, course_id):
 def learner_leaderboard(user):
 
     learners = Learner.query.all()
-
     leaderboard = []
 
     for learner in learners:
@@ -3098,7 +3268,6 @@ def learner_leaderboard(user):
         if not learner.user:
             continue
 
-        # Get this learner's enrollments
         enrollments = Enrollment.query.filter(
             Enrollment.learner_id == learner.id,
             Enrollment.status.in_(["active", "completed"])
@@ -3109,7 +3278,6 @@ def learner_leaderboard(user):
             for enrollment in enrollments
         ]
 
-        # No courses
         if not course_ids:
             leaderboard.append({
                 "learner_id": learner.id,
@@ -3118,11 +3286,11 @@ def learner_leaderboard(user):
                 "email": learner.user.email,
                 "courses": 0,
                 "completedLessons": 0,
-                "progress": 0
+                "progress": 0,
+                "xp_points": learner.xp_points or 0
             })
             continue
 
-        # All lessons belonging to enrolled courses
         course_lessons = (
             Lesson.query
             .join(
@@ -3138,11 +3306,9 @@ def learner_leaderboard(user):
         total_lessons = len(course_lessons)
 
         lesson_ids = [
-            lesson.id
-            for lesson in course_lessons
+            lesson.id for lesson in course_lessons
         ]
 
-        # Completed lessons for this learner
         completed_lessons = 0
 
         if lesson_ids:
@@ -3156,7 +3322,6 @@ def learner_leaderboard(user):
                 .count()
             )
 
-        # Overall progress
         progress = (
             int(
                 (completed_lessons / total_lessons) * 100
@@ -3172,21 +3337,19 @@ def learner_leaderboard(user):
             "email": learner.user.email,
             "courses": len(course_ids),
             "completedLessons": completed_lessons,
-            "progress": progress
+            "progress": progress,
+            "xp_points": learner.xp_points or 0
         })
 
-    # Highest progress first.
-    # If progress is equal, completed lessons are used as the
-    # second sorting value.
     leaderboard.sort(
         key=lambda item: (
+            item["xp_points"],
             item["progress"],
             item["completedLessons"]
         ),
         reverse=True
     )
 
-    # Add rank
     for index, learner_data in enumerate(
         leaderboard,
         start=1
@@ -14593,6 +14756,227 @@ def mark_all_notifications_read(user):
     return jsonify({
         "message": "All notifications marked as read"
     }), 200
+
+
+# =========================================================
+# TASK 13 - AI TUTOR
+# =========================================================
+
+from openai import OpenAI
+@api.post("/learner/ai-tutor/chat")
+@role_required("learner")
+def ai_tutor_chat(user):
+    import re
+
+    try:
+        data = request.get_json(silent=True) or {}
+
+        lesson_id = str(data.get("lesson_id", "")).strip()
+        question = str(data.get("question", "")).strip()
+
+        if not lesson_id or not question:
+            return jsonify({
+                "error": "lesson_id and question are required"
+            }), 400
+
+        if len(question) > 4000:
+            return jsonify({
+                "error": "Question must not exceed 4000 characters"
+            }), 400
+
+        # Find the learner profile
+        learner = Learner.query.filter_by(user_id=user.id).first()
+
+        if not learner:
+            return jsonify({
+                "error": "Learner profile not found"
+            }), 404
+
+        # Find the lesson and its module
+        lesson = Lesson.query.filter_by(id=lesson_id).first()
+
+        if not lesson:
+            return jsonify({
+                "error": "Lesson not found"
+            }), 404
+
+        module = Module.query.filter_by(
+            id=lesson.module_id
+        ).first()
+
+        if not module:
+            return jsonify({
+                "error": "Module not found for this lesson"
+            }), 404
+
+        # Allow learners enrolled in active or completed courses
+        enrollment = Enrollment.query.filter(
+            Enrollment.learner_id == learner.id,
+            Enrollment.course_id == module.course_id,
+            Enrollment.status.in_(["active", "completed"])
+        ).first()
+
+        if not enrollment:
+            return jsonify({
+                "error": "You must be enrolled in this course"
+            }), 403
+
+        # Read lesson content from the database
+        title = lesson.title or "Untitled Lesson"
+        raw_content = lesson.content or ""
+
+        # Remove HTML tags and clean up whitespace
+        content = re.sub(r"<[^>]+>", " ", raw_content)
+        content = re.sub(r"\s+", " ", content).strip()
+
+        if not content:
+            content = (
+                "Detailed lesson content is not available in the database. "
+                "Use the lesson title to guide your question."
+            )
+
+        # Keep processing local; no external AI API is called
+        question_lower = question.lower()
+
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", content)
+            if sentence.strip()
+        ]
+
+        if any(word in question_lower for word in [
+            "quiz", "mcq", "test me", "practice questions"
+        ]):
+            answer = (
+                f"Practice questions for: {title}\n\n"
+                "1. What is the main concept discussed in this lesson?\n"
+                "2. Explain one important point from the lesson.\n"
+                "3. How could you apply this concept in practice?\n\n"
+                "Suggested answers should be based on the lesson content:\n"
+                + "\n".join(
+                    f"- {sentence}"
+                    for sentence in sentences[:3]
+                )
+            )
+
+        elif any(word in question_lower for word in [
+            "summary", "summarize", "summarise", "short notes",
+            "key points", "important points"
+        ]):
+            answer = (
+                f"Summary: {title}\n\n"
+                + "\n".join(
+                    f"- {sentence}"
+                    for sentence in sentences[:6]
+                )
+            )
+
+        elif any(word in question_lower for word in [
+            "example", "examples", "explain", "understand",
+            "meaning", "what is", "how does", "teach me"
+        ]):
+            answer = (
+                f"Lesson: {title}\n\n"
+                f"Simple explanation:\n{content[:2500]}\n\n"
+                "Example:\n"
+                "Take an important concept from the lesson and apply "
+                "it to a small, practical situation. "
+                "The exact example depends on the concepts covered above.\n\n"
+                "Remember:\n"
+                "Review the main points and try explaining them "
+                "in your own words."
+            )
+
+        else:
+            answer = (
+                f"Your question: {question}\n\n"
+                f"Related lesson: {title}\n\n"
+                "Here is the relevant lesson content to help you "
+                "find the answer:\n\n"
+                f"{content[:2500]}\n\n"
+                "This offline tutor uses lesson content and simple "
+                "rules. Try asking for a summary, a simple explanation, "
+                "key points, or practice questions."
+            )
+
+        # Save the conversation in the existing database table
+        chat = AITutorChat(
+            learner_id=learner.id,
+            lesson_id=lesson.id,
+            question=question,
+            answer=answer
+        )
+
+        db.session.add(chat)
+        db.session.commit()
+
+        return jsonify({
+            "id": chat.id,
+            "lesson_id": lesson.id,
+            "lesson_title": title,
+            "question": question,
+            "answer": answer,
+            "mode": "offline",
+            "created_at": (
+                chat.created_at.isoformat()
+                if chat.created_at else None
+            )
+        }), 201
+
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception(
+            "Offline AI Tutor request failed"
+        )
+
+        return jsonify({
+            "error": "Unable to process the tutor request"
+        }), 500
+
+@api.get("/learner/ai-tutor/history")
+@role_required("learner")
+def ai_tutor_history(user):
+    learner = Learner.query.filter_by(
+        user_id=user.id
+    ).first()
+
+    if not learner:
+        return jsonify({
+            "error": "Learner profile not found"
+        }), 404
+
+    query = AITutorChat.query.filter_by(
+        learner_id=learner.id
+    )
+
+    lesson_id = request.args.get("lesson_id")
+
+    if lesson_id:
+        query = query.filter_by(
+            lesson_id=lesson_id
+        )
+
+    chats = query.order_by(
+        AITutorChat.created_at.desc(),
+        AITutorChat.id.desc()
+    ).limit(100).all()
+
+    return jsonify({
+        "chats": [
+            {
+                "id": chat.id,
+                "lesson_id": chat.lesson_id,
+                "question": chat.question,
+                "answer": chat.answer,
+                "created_at": (
+                    chat.created_at.isoformat()
+                    if chat.created_at else None
+                )
+            }
+            for chat in chats
+        ],
+        "count": len(chats)
+    })
 
 # ============================================================
 # END OF routes.py
